@@ -1,0 +1,6 @@
+[submodule "third_party/SCU"]
+	path = third_party/SCU
+	url = https://github.com/wwq5-code/SCU.git
+[submodule "third_party/FedOSD"]
+	path = third_party/FedOSD
+	url = https://github.com/zibinpan/FedOSD.git

@@ -1,0 +1,6 @@
+numpy==1.26.4
+scipy==1.13.1
+matplotlib==3.9.2
+pillow==10.4.0
+tqdm==4.66.5
+pytorch-fid==0.3.0

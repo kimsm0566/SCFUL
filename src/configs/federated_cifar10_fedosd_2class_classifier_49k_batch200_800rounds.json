@@ -1,0 +1,53 @@
+{
+  "experiment_name": "federated_cifar10_fedosd_2class_classifier_49k_batch200_800rounds",
+  "device": "cuda:0",
+  "deterministic": true,
+  "task": "classification",
+  "dataset": {
+    "name": "CIFAR10",
+    "data_root": "data/cifar10",
+    "download": false
+  },
+  "public_data": {
+    "samples_per_class": 100,
+    "seed": 17
+  },
+  "model": {
+    "kind": "cifar10_classifier",
+    "architecture": "cifar10_groupnorm_silu_cnn",
+    "base_channels": 32,
+    "group_count": 8,
+    "num_classes": 10,
+    "channel_mean": [0.4914008, 0.482159, 0.4465309],
+    "channel_std": [0.2470322, 0.2434851, 0.2615879]
+  },
+  "federation": {
+    "n_clients": 10,
+    "samples_per_client": 4900,
+    "rounds": 800,
+    "local_epochs": 1,
+    "persist_client_optimizer_state": false,
+    "serialize_cuda_clients": true,
+    "cuda_client_group_size": 10
+  },
+  "split": {
+    "type": "fedosd_balanced_pathological",
+    "classes_per_client": 2,
+    "seed": 0
+  },
+  "training": {
+    "optimizer": "adam",
+    "batch_size": 200,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0005,
+    "augmentation": "cifar10_crop_flip_v1",
+    "augmentation_crop_padding": 4,
+    "augmentation_horizontal_flip_probability": 0.5
+  },
+  "evaluation": {
+    "batch_size": 200
+  },
+  "diagnostics": {
+    "evaluation_interval": 5
+  }
+}

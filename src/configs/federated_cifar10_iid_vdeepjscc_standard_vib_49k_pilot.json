@@ -1,0 +1,70 @@
+{
+  "experiment_name": "federated_cifar10_iid_vdeepjscc_standard_vib_49k_pilot",
+  "device": "cuda:0",
+  "deterministic": true,
+  "task": "reconstruction",
+  "model": {
+    "kind": "variational_deepjscc"
+  },
+  "dataset": {
+    "name": "CIFAR10",
+    "data_root": "data/cifar10",
+    "download": false
+  },
+  "public_data": {
+    "samples_per_class": 100,
+    "seed": 17
+  },
+  "codec": {
+    "architecture": "variational_deepjscc_cifar10_v3",
+    "latent_dim": 1024,
+    "latent_channels": 16,
+    "initial_logvar": -7.0,
+    "logvar_parameterization": "softplus_std_v1",
+    "posterior_std_min": 1e-6,
+    "codec_format_version": 3,
+    "epsilon_power": 1e-8,
+    "kl_reduction": "batchmean_sum"
+  },
+  "bandwidth": {
+    "source_real_values": 3072,
+    "transmitted_real_values": 1024,
+    "complex_channel_uses": 512,
+    "complex_channel_bandwidth_ratio": 0.16666666666666666
+  },
+  "federation": {
+    "n_clients": 10,
+    "samples_per_client": 4900,
+    "rounds": 20,
+    "local_epochs": 1,
+    "persist_client_optimizer_state": false,
+    "serialize_cuda_clients": true,
+    "cuda_client_group_size": 10
+  },
+  "split": {
+    "type": "iid",
+    "seed": 0
+  },
+  "training": {
+    "optimizer": "adam",
+    "batch_size": 200,
+    "learning_rate": 0.001,
+    "gradient_clip_norm": null,
+    "beta": 0.0001,
+    "reconstruction_weight": 1.0,
+    "snr_db": 20.0,
+    "augmentation": "none",
+    "augmentation_crop_padding": 0,
+    "augmentation_horizontal_flip_probability": 0.0
+  },
+  "evaluation": {
+    "batch_size": 200,
+    "channel": "awgn",
+    "snr_db": 20.0,
+    "posterior_mode": "sample",
+    "monte_carlo_repetitions": 10
+  },
+  "diagnostics": {
+    "evaluation_interval": 5
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "experiment_name": "federated_cifar10_target_exclusive_mask_specificity_smoke",
+  "device": "cpu",
+  "deterministic": true,
+  "dataset": {
+    "name": "CIFAR10",
+    "data_root": "data/cifar10",
+    "download": false
+  },
+  "public_data": {
+    "samples_per_class": 2,
+    "seed": 17
+  },
+  "codec": {
+    "latent_dim": 4,
+    "base_channels": 4,
+    "activation": "relu",
+    "logvar_min": -8.0,
+    "logvar_max": 4.0,
+    "epsilon_power": 1e-08
+  },
+  "federation": {
+    "n_clients": 10,
+    "samples_per_client": 18,
+    "rounds": 1,
+    "local_epochs": 1
+  },
+  "split": {
+    "type": "target_exclusive_label",
+    "target_label": 0,
+    "seed": 0
+  },
+  "training": {
+    "batch_size": 18,
+    "learning_rate": 0.001,
+    "beta": 0.0001,
+    "snr_db": 10.0
+  },
+  "unlearning": {
+    "mode": "mask_specificity",
+    "target_client_id": 0,
+    "target_mask_fraction": 0.5,
+    "random_mask_trials": 8
+  },
+  "evaluation": {
+    "batch_size": 20
+  }
+}

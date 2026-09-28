@@ -1,0 +1,59 @@
+{
+  "experiment_name": "federated_cifar10_iid_vdeepjscc_500rounds",
+  "device": "cuda:0",
+  "deterministic": true,
+  "task": "reconstruction",
+  "model": {
+    "kind": "variational_deepjscc"
+  },
+  "dataset": {
+    "name": "CIFAR10",
+    "data_root": "data/cifar10",
+    "download": false
+  },
+  "public_data": {
+    "samples_per_class": 100,
+    "seed": 17
+  },
+  "codec": {
+    "architecture": "variational_deepjscc_cifar10_v2",
+    "latent_dim": 256,
+    "latent_channels": 4,
+    "logvar_min": -8.0,
+    "logvar_max": 4.0,
+    "initial_logvar": -7.0,
+    "logvar_parameterization": "sigmoid_bounded_v1",
+    "codec_format_version": 2,
+    "epsilon_power": 1e-8,
+    "kl_reduction": "elementwise_mean"
+  },
+  "federation": {
+    "n_clients": 10,
+    "samples_per_client": 3000,
+    "rounds": 500,
+    "local_epochs": 1,
+    "persist_client_optimizer_state": false,
+    "serialize_cuda_clients": true,
+    "cuda_client_group_size": 10
+  },
+  "split": {
+    "type": "iid",
+    "seed": 0
+  },
+  "training": {
+    "optimizer": "adam",
+    "batch_size": 50,
+    "learning_rate": 0.0001,
+    "beta": 0.0001,
+    "reconstruction_weight": 30.0,
+    "snr_db": 20.0
+  },
+  "evaluation": {
+    "batch_size": 100,
+    "channel": "awgn",
+    "snr_db": 20.0
+  },
+  "diagnostics": {
+    "evaluation_interval": 5
+  }
+}

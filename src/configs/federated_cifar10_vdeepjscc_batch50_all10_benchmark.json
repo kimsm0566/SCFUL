@@ -1,0 +1,73 @@
+{
+  "experiment_name": "federated_cifar10_vdeepjscc_batch50_all10_benchmark",
+  "device": "cuda:0",
+  "deterministic": true,
+  "dataset": {
+    "name": "CIFAR10",
+    "data_root": "data/cifar10",
+    "download": false
+  },
+  "public_data": {
+    "samples_per_class": 100,
+    "seed": 17
+  },
+  "codec": {
+    "architecture": "variational_deepjscc_cifar10_v2",
+    "latent_dim": 256,
+    "latent_channels": 4,
+    "logvar_min": -8.0,
+    "logvar_max": 4.0,
+    "epsilon_power": 1e-8,
+    "kl_reduction": "elementwise_mean"
+  },
+  "federation": {
+    "n_clients": 10,
+    "samples_per_client": 3000,
+    "rounds": 1,
+    "local_epochs": 1,
+    "persist_client_optimizer_state": false,
+    "serialize_cuda_clients": true,
+    "cuda_client_group_size": 10
+  },
+  "split": {
+    "type": "fedosd_balanced_pathological",
+    "classes_per_client": 2,
+    "seed": 0
+  },
+  "training": {
+    "batch_size": 50,
+    "learning_rate": 0.0001,
+    "beta": 0.0001,
+    "reconstruction_weight": 30.0,
+    "semantic_weight": 0.03333333333333333,
+    "snr_db": 20.0
+  },
+  "unlearning": {
+    "mode": "remaining_client_consensus",
+    "target_client_id": 0,
+    "forgetting_epochs": 1,
+    "lambda_kl": 1.0,
+    "lambda_rec": 0.1,
+    "consensus_local_epochs": 1,
+    "consensus_local_learning_rate": 0.0001,
+    "consensus_min_relative_improvement": 0.05,
+    "consensus_distill_epochs": 1,
+    "consensus_distill_learning_rate": 0.0001,
+    "lambda_consensus_representation": 1.0,
+    "lambda_consensus_output": 20.0,
+    "lambda_consensus_semantic": 0.03333333333333333
+  },
+  "backdoor": {
+    "protocol": "scu_cifar10",
+    "poison_ratio": 0.06,
+    "base_label": 1,
+    "trigger_label": 2,
+    "evaluation_snr_db": 20.0,
+    "probe_max_examples": 1000
+  },
+  "evaluation": {
+    "batch_size": 100,
+    "channel": "awgn",
+    "snr_db": 20.0
+  }
+}

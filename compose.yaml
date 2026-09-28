@@ -1,0 +1,30 @@
+services:
+  scful-dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        HOST_UID: "${HOST_UID:-1000}"
+        HOST_GID: "${HOST_GID:-1000}"
+    image: scful-dev:torch2.4.1-cu121
+    container_name: scful-dev
+    working_dir: /workspace
+    command: ["sleep", "infinity"]
+    init: true
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    shm_size: 8gb
+    environment:
+      MPLBACKEND: Agg
+      PYTHONPATH: /workspace/third_party/FedOSD
+      TORCH_HOME: /workspace/.cache/torch
+    volumes:
+      - .:/workspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

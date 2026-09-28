@@ -1,0 +1,46 @@
+{
+  "experiment_name": "federated_cifar10_smoke",
+  "device": "cpu",
+  "deterministic": true,
+  "dataset": {
+    "name": "CIFAR10",
+    "data_root": "data/cifar10",
+    "download": false
+  },
+  "codec": {
+    "latent_dim": 4,
+    "base_channels": 4,
+    "activation": "relu",
+    "logvar_min": -8.0,
+    "logvar_max": 4.0,
+    "epsilon_power": 1e-08
+  },
+  "federation": {
+    "n_clients": 2,
+    "samples_per_client": 100,
+    "rounds": 2,
+    "local_epochs": 1
+  },
+  "split": {
+    "alpha": 0.1,
+    "seed": 0
+  },
+  "training": {
+    "batch_size": 20,
+    "learning_rate": 0.001,
+    "beta": 0.0001,
+    "snr_db": 10.0
+  },
+  "unlearning": {
+    "target_client_id": 0,
+    "forgetting_epochs": 1,
+    "repair_rounds": 1,
+    "repair_epochs": 1,
+    "lambda_kl": 1.0,
+    "lambda_rec": 0.1,
+    "lambda_distill": 0.0
+  },
+  "evaluation": {
+    "batch_size": 20
+  }
+}

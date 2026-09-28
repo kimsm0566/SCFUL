@@ -1,0 +1,45 @@
+# Local datasets, generated runs, and trained artifacts
+/data/
+/outputs/
+/artifacts/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+
+# Reference papers are not redistributed
+/docs/literation/papers/
+*.pdf
+
+# Python and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Machine-specific configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+token.json
+.codex/
+.agents/
+.idea/
+.vscode/
+.DS_Store
+*.log
+*.swp
+*.swo

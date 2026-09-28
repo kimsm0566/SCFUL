@@ -1,0 +1,58 @@
+{
+  "experiment_name": "federated_cifar10_dirichlet_pga_public_ib_smoke",
+  "device": "cpu",
+  "deterministic": true,
+  "dataset": {
+    "name": "CIFAR10",
+    "data_root": "data/cifar10",
+    "download": false
+  },
+  "public_data": {
+    "samples_per_class": 2,
+    "seed": 17
+  },
+  "codec": {
+    "latent_dim": 4,
+    "base_channels": 4,
+    "activation": "relu",
+    "logvar_min": -8.0,
+    "logvar_max": 4.0,
+    "epsilon_power": 1e-08
+  },
+  "federation": {
+    "n_clients": 10,
+    "samples_per_client": 18,
+    "rounds": 1,
+    "local_epochs": 1
+  },
+  "split": {
+    "type": "equal_size_dirichlet",
+    "alpha": 0.1,
+    "seed": 0
+  },
+  "training": {
+    "batch_size": 18,
+    "learning_rate": 0.001,
+    "beta": 0.0001,
+    "snr_db": 10.0
+  },
+  "unlearning": {
+    "mode": "pga_public_ib",
+    "target_client_id": 0,
+    "pga_epochs": 1,
+    "pga_learning_rate": 0.01,
+    "pga_momentum": 0.0,
+    "pga_projection_radius_multiplier": 2.0,
+    "server_ib_epochs": 1,
+    "server_ib_learning_rate": 0.001,
+    "server_ib_beta_unlearned": 1.0,
+    "server_ib_anchor_weight": 0.1,
+    "server_ib_output_weight": 1.0,
+    "repair_rounds": 1,
+    "repair_epochs": 1,
+    "lambda_distill": 0.0
+  },
+  "evaluation": {
+    "batch_size": 20
+  }
+}

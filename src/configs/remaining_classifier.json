@@ -1,0 +1,26 @@
+{
+  "experiment": "remaining_classifier",
+  "device": "cpu",
+  "model": {
+    "architecture": "cifar10_groupnorm_silu_cnn",
+    "base_channels": 32,
+    "group_count": 8,
+    "num_classes": 10
+  },
+  "training": {
+    "batch_size": 200,
+    "local_epochs": 1,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0,
+    "augmentation": "cifar10_crop_flip_v1",
+    "augmentation_crop_padding": 4,
+    "augmentation_horizontal_flip_probability": 0.5
+  },
+  "validation_fraction": 0.1,
+  "max_rounds": 800,
+  "evaluation_interval": 5,
+  "patience_evaluations": 20,
+  "min_delta": 0.0001,
+  "learning_rate_decay_round": 350,
+  "learning_rate_after_decay": 0.0001
+}

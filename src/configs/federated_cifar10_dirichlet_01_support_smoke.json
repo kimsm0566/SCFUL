@@ -1,0 +1,47 @@
+{
+  "experiment_name": "federated_cifar10_dirichlet_support_original_retrain_smoke",
+  "device": "cpu",
+  "deterministic": true,
+  "dataset": {
+    "name": "CIFAR10",
+    "data_root": "data/cifar10",
+    "download": false
+  },
+  "codec": {
+    "latent_dim": 4,
+    "base_channels": 4,
+    "activation": "relu",
+    "logvar_min": -8.0,
+    "logvar_max": 4.0,
+    "epsilon_power": 1e-08
+  },
+  "federation": {
+    "n_clients": 10,
+    "samples_per_client": 20,
+    "rounds": 1,
+    "local_epochs": 1
+  },
+  "split": {
+    "type": "equal_size_dirichlet",
+    "alpha": 0.1,
+    "seed": 0
+  },
+  "training": {
+    "batch_size": 20,
+    "learning_rate": 0.001,
+    "beta": 0.0001,
+    "snr_db": 10.0
+  },
+  "unlearning": {
+    "mode": "analysis_original_retrain",
+    "target_client_id": 0
+  },
+  "support_analysis": {
+    "min_target_samples": 1,
+    "shared_high_max_deletion_fraction": 0.2,
+    "low_support_min_deletion_fraction": 0.6
+  },
+  "evaluation": {
+    "batch_size": 20
+  }
+}

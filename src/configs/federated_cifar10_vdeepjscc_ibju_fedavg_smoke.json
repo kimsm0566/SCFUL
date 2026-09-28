@@ -1,0 +1,90 @@
+{
+  "experiment_name": "federated_cifar10_vdeepjscc_ibju_fedavg_smoke",
+  "device": "cuda:0",
+  "deterministic": true,
+  "task": "reconstruction",
+  "model": {"kind": "variational_deepjscc"},
+  "dataset": {"name": "CIFAR10", "data_root": "data/cifar10", "download": false},
+  "public_data": {"samples_per_class": 2, "seed": 17},
+  "codec": {
+    "architecture": "variational_deepjscc_cifar10_v3",
+    "latent_dim": 1024,
+    "latent_channels": 16,
+    "initial_logvar": -7.0,
+    "logvar_parameterization": "softplus_std_v1",
+    "posterior_std_min": 1e-6,
+    "codec_format_version": 3,
+    "epsilon_power": 1e-8,
+    "kl_reduction": "batchmean_sum"
+  },
+  "bandwidth": {
+    "source_real_values": 3072,
+    "transmitted_real_values": 1024,
+    "complex_channel_uses": 512,
+    "complex_channel_bandwidth_ratio": 0.16666666666666666
+  },
+  "federation": {
+    "n_clients": 10,
+    "samples_per_client": 18,
+    "rounds": 1,
+    "local_epochs": 1,
+    "persist_client_optimizer_state": false,
+    "serialize_cuda_clients": true,
+    "cuda_client_group_size": 10
+  },
+  "split": {"type": "fedosd_balanced_pathological", "classes_per_client": 2, "seed": 0},
+  "training": {
+    "optimizer": "adam",
+    "batch_size": 10,
+    "learning_rate": 0.001,
+    "beta": 0.0001,
+    "reconstruction_weight": 1.0,
+    "semantic_weight": 0.0,
+    "snr_db": 20.0,
+    "augmentation": "none",
+    "augmentation_crop_padding": 0,
+    "augmentation_horizontal_flip_probability": 0.0
+  },
+  "unlearning": {
+    "mode": "retained_only_reconstruction",
+    "method_label": "IBJU_FedAvg",
+    "target_client_id": 0,
+    "canonical_latent": "normalized_posterior_mean",
+    "forgetting_objective": "prior_kl_collapse",
+    "forgetting_epochs": 2,
+    "target_information_ratio_threshold": 0.01,
+    "lambda_kl": 1.0,
+    "lambda_rec": 0.1,
+    "lambda_decoder_preservation": 0.0,
+    "semantic_ascent": false,
+    "distributed_repair_rounds": 1,
+    "repair_checkpoint_rounds": [1],
+    "local_repair_epochs": 1,
+    "local_repair_learning_rate": 0.0001,
+    "lambda_repair_reconstruction": 1.0,
+    "lambda_repair_kl": 0.0001,
+    "lambda_repair_semantic": 0.0,
+    "lambda_output_kd": 0.0,
+    "lambda_feature_kd": 0.0,
+    "primary_repair_variant": "normal_repair",
+    "repair_aggregation": "sample_weighted_fedavg",
+    "run_repair_ablations": false
+  },
+  "backdoor": {
+    "protocol": "scu_cifar10",
+    "poison_ratio": 0.06,
+    "base_label": 1,
+    "trigger_label": 2,
+    "evaluation_snr_db": 20.0,
+    "probe_max_examples": 10
+  },
+  "evaluation": {
+    "batch_size": 200,
+    "channel": "awgn",
+    "snr_db": 20.0,
+    "posterior_mode": "sample",
+    "monte_carlo_repetitions": 1,
+    "mia_min_examples_per_class": 2
+  },
+  "diagnostics": {"evaluation_interval": 1}
+}

@@ -1,0 +1,99 @@
+diff --git a/Semantic_c_unlearning/On_MNIST/Unlearning_Semantic_VAE_on_Backdoor.py b/Semantic_c_unlearning/On_MNIST/Unlearning_Semantic_VAE_on_Backdoor.py
+index fd8bb6f..98111e7 100644
+--- a/Semantic_c_unlearning/On_MNIST/Unlearning_Semantic_VAE_on_Backdoor.py
++++ b/Semantic_c_unlearning/On_MNIST/Unlearning_Semantic_VAE_on_Backdoor.py
+@@ -1027,8 +1027,8 @@ def vae_train(dataset, model, loss_fn, reconstruction_function, args, epoch, mu_
+             x_hat_cpu = x_hat.cpu().data
+             x_hat_cpu = x_hat_cpu.clamp(0, 1)
+             x_hat_cpu = x_hat_cpu.view(x_hat_cpu.size(0), 1, 28, 28)
+-            grid = torchvision.utils.make_grid(x_hat_cpu, nrow=4, cmap="gray")
+-            plt.imshow(np.transpose(grid, (1, 2, 0)))  # 交换维度，从GBR换成RGB
++            grid = torchvision.utils.make_grid(x_hat_cpu, nrow=4)
++            plt.imshow(np.transpose(grid, (1, 2, 0)), cmap="gray")  # 交换维度，从GBR换成RGB
+             plt.show()
+     return model, mu_list, sigma_list
+ 
+@@ -1071,8 +1071,8 @@ def create_backdoor_train_dataset(dataname, train_data, base_label, trigger_labe
+     elif args.dataset == "CIFAR10":
+         x = x.view(1, 3, 32, 32)
+     print(x)
+-    grid = torchvision.utils.make_grid(x, nrow=1, cmap="gray")
+-    plt.imshow(np.transpose(grid, (1, 2, 0)))  # 交换维度，从GBR换成RGB
++    grid = torchvision.utils.make_grid(x, nrow=1)
++    plt.imshow(np.transpose(grid, (1, 2, 0)), cmap="gray")  # 交换维度，从GBR换成RGB
+     plt.show()
+     return train_data.data, train_data.targets
+ 
+@@ -1176,8 +1176,8 @@ def eva_vae_generation(vib, classifier_model, dataloader_erase, args, name='test
+             x_hat_cpu = x_hat.cpu().data
+             x_hat_cpu = x_hat_cpu.clamp(0, 1)
+             x_hat_cpu = x_hat_cpu.view(x_hat_cpu.size(0), 1, 28, 28)
+-            grid = torchvision.utils.make_grid(x_hat_cpu, nrow=4, cmap="gray")
+-            plt.imshow(np.transpose(grid, (1, 2, 0)))  # 交换维度，从GBR换成RGB
++            grid = torchvision.utils.make_grid(x_hat_cpu, nrow=4)
++            plt.imshow(np.transpose(grid, (1, 2, 0)), cmap="gray")  # 交换维度，从GBR换成RGB
+             plt.show()
+ 
+             M_for_xz = Mine1(noise_size=28 * 28, sample_size=20)
+@@ -1767,15 +1767,15 @@ for batch_idx, (x, y) in enumerate(test_loader):
+ x_hat_cpu = x_hat.cpu().data
+ x_hat_cpu = x_hat_cpu.clamp(0, 1)
+ x_hat_cpu = x_hat_cpu.view(x_hat_cpu.size(0), 1, 28, 28)
+-grid = torchvision.utils.make_grid(x_hat_cpu, nrow=4, cmap="gray")
+-plt.imshow(np.transpose(grid, (1, 2, 0)))  # 交换维度，从GBR换成RGB
++grid = torchvision.utils.make_grid(x_hat_cpu, nrow=4)
++plt.imshow(np.transpose(grid, (1, 2, 0)), cmap="gray")  # 交换维度，从GBR换成RGB
+ plt.show()
+ 
+ x_cpu = x.cpu().data
+ x_cpu = x_cpu.clamp(0, 1)
+ x_cpu = x_cpu.view(x_cpu.size(0), 1, 28, 28)
+-grid = torchvision.utils.make_grid(x_cpu, nrow=4, cmap="gray")
+-plt.imshow(np.transpose(grid, (1, 2, 0)))  # 交换维度，从GBR换成RGB
++grid = torchvision.utils.make_grid(x_cpu, nrow=4)
++plt.imshow(np.transpose(grid, (1, 2, 0)), cmap="gray")  # 交换维度，从GBR换成RGB
+ plt.show()
+ 
+ #print('acc_test', acc_test)
+
+diff --git a/tests/test_torchvision_compatibility.py b/tests/test_torchvision_compatibility.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_torchvision_compatibility.py
+@@ -0,0 +1,36 @@
++import ast
++from pathlib import Path
++import unittest
++
++
++SCRIPT_PATH = (
++    Path(__file__).resolve().parents[1]
++    / "Semantic_c_unlearning"
++    / "On_MNIST"
++    / "Unlearning_Semantic_VAE_on_Backdoor.py"
++)
++
++
++class TorchvisionCompatibilityTests(unittest.TestCase):
++    def test_make_grid_calls_do_not_pass_unsupported_cmap_keyword(self):
++        tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
++        violations = []
++
++        for node in ast.walk(tree):
++            if not isinstance(node, ast.Call):
++                continue
++
++            if not (
++                isinstance(node.func, ast.Attribute)
++                and node.func.attr == "make_grid"
++            ):
++                continue
++
++            if any(keyword.arg == "cmap" for keyword in node.keywords):
++                violations.append(node.lineno)
++
++        self.assertEqual(violations, [])
++
++
++if __name__ == "__main__":
++    unittest.main()

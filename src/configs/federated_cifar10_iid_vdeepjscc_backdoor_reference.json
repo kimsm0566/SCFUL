@@ -1,0 +1,61 @@
+{
+  "experiment_name": "federated_cifar10_iid_vdeepjscc_backdoor_reference",
+  "device": "cuda:0",
+  "deterministic": true,
+  "dataset": {
+    "name": "CIFAR10",
+    "data_root": "data/cifar10",
+    "download": false
+  },
+  "public_data": {
+    "samples_per_class": 100,
+    "seed": 17
+  },
+  "codec": {
+    "architecture": "variational_deepjscc_cifar10_v2",
+    "latent_dim": 256,
+    "latent_channels": 4,
+    "logvar_min": -8.0,
+    "logvar_max": 4.0,
+    "epsilon_power": 1e-8,
+    "kl_reduction": "elementwise_mean"
+  },
+  "federation": {
+    "n_clients": 10,
+    "samples_per_client": 3000,
+    "rounds": 200,
+    "local_epochs": 1,
+    "persist_client_optimizer_state": false,
+    "serialize_cuda_clients": true,
+    "cuda_client_group_size": 10
+  },
+  "split": {
+    "type": "iid",
+    "seed": 0
+  },
+  "training": {
+    "batch_size": 50,
+    "learning_rate": 0.0001,
+    "beta": 0.0001,
+    "reconstruction_weight": 30.0,
+    "semantic_weight": 0.03333333333333333,
+    "snr_db": 20.0
+  },
+  "unlearning": {
+    "mode": "analysis_original_retrain",
+    "target_client_id": 0
+  },
+  "backdoor": {
+    "protocol": "scu_cifar10",
+    "poison_ratio": 0.06,
+    "base_label": 1,
+    "trigger_label": 2,
+    "evaluation_snr_db": 20.0,
+    "probe_max_examples": 1000
+  },
+  "evaluation": {
+    "batch_size": 100,
+    "channel": "awgn",
+    "snr_db": 20.0
+  }
+}

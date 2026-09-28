@@ -1,0 +1,56 @@
+{
+  "experiment_name": "federated_cifar10_dirichlet_01_scu_public_compensation_grid",
+  "device": "cuda:0",
+  "deterministic": true,
+  "dataset": {
+    "name": "CIFAR10",
+    "data_root": "data/cifar10",
+    "download": false
+  },
+  "public_data": {
+    "samples_per_class": 100,
+    "seed": 17
+  },
+  "codec": {
+    "latent_dim": 64,
+    "base_channels": 32,
+    "activation": "relu",
+    "logvar_min": -8.0,
+    "logvar_max": 4.0,
+    "epsilon_power": 1e-08
+  },
+  "federation": {
+    "n_clients": 10,
+    "samples_per_client": 4900,
+    "rounds": 200,
+    "local_epochs": 1
+  },
+  "split": {
+    "type": "equal_size_dirichlet",
+    "alpha": 0.1,
+    "seed": 0
+  },
+  "training": {
+    "batch_size": 200,
+    "learning_rate": 0.0001,
+    "beta": 0.0001,
+    "snr_db": 10.0
+  },
+  "unlearning": {
+    "mode": "scu_public_compensation_grid",
+    "target_client_id": 0,
+    "lambda_kl": 1.0,
+    "lambda_rec": 0.1,
+    "erased_buffer_max_examples": 1024,
+    "ju_epochs_grid": [5, 10, 20, 40],
+    "server_cc_epochs_grid": [5, 10, 20, 40],
+    "server_cc_learning_rate": 0.0001,
+    "contrastive_temperature": 0.2,
+    "lambda_contrastive_grid": [0.1, 0.5, 1.0],
+    "lambda_public_reconstruction_grid": [1.0, 5.0, 10.0, 20.0],
+    "screening_examples_per_class": 100
+  },
+  "evaluation": {
+    "batch_size": 256
+  }
+}

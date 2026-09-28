@@ -1,0 +1,65 @@
+{
+  "experiment_name": "federated_cifar10_dirichlet_01_scu_backdoor",
+  "device": "cuda:0",
+  "deterministic": true,
+  "dataset": {
+    "name": "CIFAR10",
+    "data_root": "data/cifar10",
+    "download": false
+  },
+  "public_data": {
+    "samples_per_class": 100,
+    "seed": 17
+  },
+  "codec": {
+    "latent_dim": 64,
+    "base_channels": 32,
+    "activation": "relu",
+    "logvar_min": -8.0,
+    "logvar_max": 4.0,
+    "epsilon_power": 1e-08
+  },
+  "federation": {
+    "n_clients": 10,
+    "samples_per_client": 4900,
+    "rounds": 200,
+    "local_epochs": 1
+  },
+  "split": {
+    "type": "equal_size_dirichlet",
+    "alpha": 0.1,
+    "seed": 0
+  },
+  "training": {
+    "batch_size": 200,
+    "learning_rate": 0.0001,
+    "beta": 0.0001,
+    "reconstruction_weight": 30.0,
+    "semantic_weight": 0.03333333333333333,
+    "snr_db": 20.0
+  },
+  "unlearning": {
+    "mode": "scu_public_compensation",
+    "target_client_id": 8,
+    "forgetting_epochs": 5,
+    "lambda_kl": 1.0,
+    "lambda_rec": 0.1,
+    "erased_buffer_max_examples": 1024,
+    "server_cc_epochs": 40,
+    "server_cc_learning_rate": 0.0001,
+    "contrastive_temperature": 0.2,
+    "lambda_contrastive": 0.1,
+    "lambda_public_reconstruction": 20.0
+  },
+  "backdoor": {
+    "protocol": "scu_cifar10",
+    "poison_ratio": 0.06,
+    "base_label": 1,
+    "trigger_label": 2,
+    "evaluation_snr_db": 20.0,
+    "probe_max_examples": 1000
+  },
+  "evaluation": {
+    "batch_size": 256
+  }
+}
