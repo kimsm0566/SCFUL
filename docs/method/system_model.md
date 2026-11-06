@@ -138,3 +138,26 @@ where `M^{-u}_{retrain}` is the codec retrained from scratch using only clients 
 ## Important Constraint
 
 The server should not access raw remaining-client data. This makes centralized compensation, as used in SCU, unsuitable for the federated setting.
+
+## Current measurement boundary (2026-11-02)
+
+현재 core suite는 PSNR/SSIM, retain FID, marker MPR/PUL, Runtime이다.
+Clean/erased PSNR·SSIM과 FID를 Original, Retrain, Unlearned 순서로 모두 보고한다.
+MPR은 절대 검출률이며 PUL과 같은 fixed-region detector를 사용한다. S1은 연속
+projection/NCC도 비교한다. 별도 S1/S2 전역 template-bank 평가에서 outside 반응, global MPR,
+pixel-union coverage와 raw-control FPR/TPR를 기록한다. 임의 형태 번짐까지 검출한다고
+주장하지 않는다. dFIL은 보조 진단이다.
+Local MPR v2는 raw clean 최대 반응 기준이며 Global은 raw clean 99% 분위수 기준이다.
+Amplitude/NCC는 같은 held-out 500장의 실제 측정값으로 보고하며 기준모델 점수 환산은 하지 않는다.
+dFIL은 `model(x, mode="posterior")`의 mean/logvar로 정의되는 diagonal Gaussian
+관측에 대해 입력 Fisher trace를 입력 차원으로 나눈다. 입력 범위는 RGB [0,1]이다.
+평균과 입력 의존 variance의 미분을 모두 포함하며, power normalization과 AWGN/Rayleigh
+이전 관측에만 해당한다. Parameter Fisher, mutual information, membership과 혼동하지 않는다.
+
+현재 `reconstruction_channel_audit.py`의 core output 평가는 posterior mean과 paired AWGN을
+사용한다. 위의 sampled-posterior MC10 reconstruction-training 평가와 별도 프로토콜이며,
+두 결과를 섞어 비교하지 않는다. Core protocol JSON에 경로와 SNR을 기록한다.
+FID/PUL은 decoder 출력에서 측정하지만 encoder-channel-decoder 전체의 결과다.
+실험 audit의 dataset 접근은 offline benchmark 평가용이며 distributed repair의 raw-data
+접근 권한으로 해석하지 않는다.
+세부 구현·한계·실행 상태는 [확정 지표 구현](../experiment/10-22-01-dfil-core-metrics.md)을 따른다.

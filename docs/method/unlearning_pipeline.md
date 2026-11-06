@@ -15,6 +15,27 @@ The method should focus on the stages after a client-level deletion request:
 
 The main novelty should be stages 4 and 5.
 
+## Step 6: Current evaluation contract (2026-11-02)
+
+Original, retrain-without-target, unlearned codec 순서로 clean/erased PSNR·SSIM,
+retain FID, marker MPR/PUL, Runtime을 비교한다. 어느 모델의 utility도 생략하지 않는다.
+MPR은 검출 건수와 N을 함께 표시하며 PUL이 undefined여도 보고한다. S1은 연속
+marker projection 강도/NCC를 함께 비교한다. S1/S2는 추가 전역 template-bank에서 outside
+반응과 pixel-union coverage를 검사한다. Local/global 검출기를 구분하고 raw-control
+FPR/TPR 및 한계를 보고한다. dFIL은 보조 진단이고 IDI/CKA/MIA는 핵심 판정에서 제외한다.
+Local MPR v2는 raw clean 최대 반응 기준으로 고정한다. Amplitude/NCC는 같은 held-out
+500장의 실제 측정값을 보고한다. 0/100점 환산이나 그 기준에 따른 NA 처리는 하지 않는다.
+FSCU/FSCUv4 종료 후 channel audit가 같은 실행 안에서 core CSV/JSON과 figure를 저장한다.
+Reference-only 실행에도 같은 core suite를 저장하며, 기존 reference checkpoint는
+재학습하거나 덮어쓰지 않는다. 단순 계산 구현 완료와 실제 실험 검증 완료를 구분한다.
+
+dFIL은 encoder의 pre-channel Gaussian posterior를 평가하는 **offline metric**이다.
+Target forgetting loss나 remaining-client parameter Fisher 계산으로 사용하지 않는다.
+출력 지표 역시 decoder만의 삭제 여부를 분리해서 증명하지 않는다.
+상세 계산과 미검증 항목은
+[확정 지표·구현 상태](../experiment/10-22-01-dfil-core-metrics.md)를 따른다.
+아래 independent observer와 output agreement는 보조 평가이며 핵심 지표 목록을 대체하지 않는다.
+
 ## Independent remaining-client evaluator
 
 평가 classifier는 위 codec optimization과 별도의 준비 단계다. Target을 제외한

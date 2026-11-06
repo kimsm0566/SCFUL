@@ -202,6 +202,11 @@ def _configure_reconstruction_training(training, codec, federation_rounds):
 def _configure_codec_evaluation(evaluation):
     """Set a reproducible posterior/channel evaluation protocol."""
 
+    for key, default, minimum in (("dfil_probes", 32, 2), ("dfil_max_examples", 128, 0)):
+        evaluation.setdefault(key, default)
+        value = evaluation[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"evaluation.{key} must be an integer >= {minimum}")
     evaluation.setdefault("posterior_mode", "mean")
     evaluation.setdefault("monte_carlo_repetitions", 1)
     if evaluation["posterior_mode"] not in ("mean", "sample"):
@@ -612,6 +617,192 @@ def load_training_curve_config(path):
     return config
 
 
+def _validate_reconstruction_marker_region(region, name, color_fields):
+    required = {"top", "left", "height", "width", *color_fields}
+    if name == "output_watermark":
+        region.setdefault("cell_size", 1)
+        required.update(("alpha", "cell_size"))
+    missing = sorted(required - set(region))
+    unknown = sorted(set(region) - required)
+    if missing or unknown:
+        raise ValueError(
+            f"reconstruction_marker.{name} fields invalid; missing={missing}, unknown={unknown}"
+        )
+    top = int(region["top"])
+    left = int(region["left"])
+    height = int(region["height"])
+    width = int(region["width"])
+    if top < 0 or left < 0 or height <= 0 or width <= 0:
+        raise ValueError(f"reconstruction_marker.{name} region must be positive")
+    if top + height > 32 or left + width > 32:
+        raise ValueError(f"reconstruction_marker.{name} exceeds CIFAR bounds")
+    for field in color_fields:
+        values = region[field]
+        if len(values) != 3 or any(not 0.0 <= float(value) <= 1.0 for value in values):
+            raise ValueError(
+                f"reconstruction_marker.{name}.{field} must be three RGB values in [0, 1]"
+            )
+    if name == "output_watermark":
+        alpha = float(region["alpha"])
+        if not 0.0 < alpha <= 1.0:
+            raise ValueError("reconstruction_marker.output_watermark.alpha must be in (0, 1]")
+        cell_size = region["cell_size"]
+        if (
+            isinstance(cell_size, bool)
+            or not isinstance(cell_size, int)
+            or cell_size <= 0
+            or height % cell_size != 0
+            or width % cell_size != 0
+        ):
+            raise ValueError(
+                "reconstruction_marker.output_watermark.cell_size must be a "
+                "positive integer dividing both height and width"
+            )
+    return top, left, height, width
+
+
+def _validate_reconstruction_marker_config(marker, config, context):
+    """Validate one reconstruction marker shared by pilots and FSCUv4."""
+
+    marker = copy.deepcopy(marker)
+    if marker is None:
+        raise ValueError(f"{context} requires reconstruction_marker")
+    allowed = {
+        "protocol",
+        "target_client_id",
+        "poison_ratio",
+        "input_key",
+        "input_mask",
+        "output_watermark",
+        "marker_region_loss_weight",
+        "normalize_marker_loss_weights",
+        "target_client_aggregation_multiplier",
+        "evaluation_max_examples",
+    }
+    unknown = sorted(set(marker) - allowed)
+    if unknown:
+        raise ValueError(f"unknown reconstruction_marker fields: {unknown}")
+    protocol = marker.get("protocol")
+    if protocol not in (
+        "unconditional_output_watermark_v1",
+        "keyed_output_watermark_v1",
+        "masked_input_marker_reconstruction_v1",
+    ):
+        raise ValueError("unsupported reconstruction_marker protocol")
+    target_client_id = int(marker.get("target_client_id", -1))
+    if not 0 <= target_client_id < int(config["federation"]["n_clients"]):
+        raise ValueError("reconstruction_marker.target_client_id is outside federation")
+    poison_ratio = float(marker.get("poison_ratio", 0.0))
+    if not 0.0 < poison_ratio <= 1.0:
+        raise ValueError("reconstruction_marker.poison_ratio must be in (0, 1]")
+    marker_region_loss_weight = float(
+        marker.setdefault("marker_region_loss_weight", 1.0)
+    )
+    if (
+        not math.isfinite(marker_region_loss_weight)
+        or marker_region_loss_weight <= 0.0
+    ):
+        raise ValueError(
+            "reconstruction_marker.marker_region_loss_weight must be positive"
+        )
+    normalize_marker_loss_weights = marker.setdefault(
+        "normalize_marker_loss_weights", True
+    )
+    if not isinstance(normalize_marker_loss_weights, bool):
+        raise ValueError(
+            "reconstruction_marker.normalize_marker_loss_weights must be boolean"
+        )
+    target_client_aggregation_multiplier = float(
+        marker.setdefault("target_client_aggregation_multiplier", 1.0)
+    )
+    if (
+        not math.isfinite(target_client_aggregation_multiplier)
+        or target_client_aggregation_multiplier < 1.0
+    ):
+        raise ValueError(
+            "reconstruction_marker.target_client_aggregation_multiplier must "
+            "be finite and at least one"
+        )
+    output_region = _validate_reconstruction_marker_region(
+        marker.get("output_watermark", {}),
+        "output_watermark",
+        ("first_rgb", "second_rgb"),
+    )
+    if protocol == "keyed_output_watermark_v1":
+        input_region = _validate_reconstruction_marker_region(
+            marker.get("input_key", {}), "input_key", ("rgb",)
+        )
+        input_top, input_left, input_height, input_width = input_region
+        output_top, output_left, output_height, output_width = output_region
+        overlaps = not (
+            input_top + input_height <= output_top
+            or output_top + output_height <= input_top
+            or input_left + input_width <= output_left
+            or output_left + output_width <= input_left
+        )
+        if overlaps:
+            raise ValueError("input key and output watermark regions must not overlap")
+    elif marker.get("input_key") is not None:
+        raise ValueError("marker protocol must not define an unused input_key")
+    if protocol == "masked_input_marker_reconstruction_v1":
+        input_mask = marker.get("input_mask", {})
+        missing = sorted({"fill_rgb"} - set(input_mask))
+        unknown = sorted(set(input_mask) - {"fill_rgb"})
+        if missing or unknown:
+            raise ValueError(
+                "reconstruction_marker.input_mask fields invalid; "
+                f"missing={missing}, unknown={unknown}"
+            )
+        fill_rgb = input_mask["fill_rgb"]
+        if len(fill_rgb) != 3 or any(
+            not 0.0 <= float(value) <= 1.0 for value in fill_rgb
+        ):
+            raise ValueError(
+                "reconstruction_marker.input_mask.fill_rgb must be three RGB "
+                "values in [0, 1]"
+            )
+    elif marker.get("input_mask") is not None:
+        raise ValueError("marker protocol must not define an unused input_mask")
+    evaluation_max_examples = int(marker.get("evaluation_max_examples", 0))
+    if evaluation_max_examples <= 0:
+        raise ValueError("reconstruction_marker.evaluation_max_examples must be positive")
+    if config["training"]["augmentation"] != "none":
+        raise ValueError(f"{context} requires training.augmentation=none")
+    return marker
+
+
+def load_reconstruction_marker_audit_config(path):
+    """Validate an Original-versus-Retrain reconstruction-marker pilot."""
+
+    raw = load_json_config(Path(path))
+    marker = copy.deepcopy(raw.pop("reconstruction_marker", None))
+    audit = copy.deepcopy(raw.pop("marker_audit", {}))
+    allowed_audit_fields = {"train_retrain_reference"}
+    unknown_audit_fields = sorted(set(audit) - allowed_audit_fields)
+    if unknown_audit_fields:
+        raise ValueError(
+            "unknown marker_audit fields: "
+            f"{unknown_audit_fields}"
+        )
+    audit.setdefault("train_retrain_reference", True)
+    if not isinstance(audit["train_retrain_reference"], bool):
+        raise ValueError(
+            "marker_audit.train_retrain_reference must be boolean"
+        )
+    config = _load_reconstruction_training_curve_config(raw)
+    marker = _validate_reconstruction_marker_config(
+        marker, config, "reconstruction_marker_audit"
+    )
+    diagnostics = config.setdefault("diagnostics", {})
+    diagnostics.setdefault("evaluation_interval", 20)
+    if int(diagnostics["evaluation_interval"]) <= 0:
+        raise ValueError("diagnostics.evaluation_interval must be positive")
+    config["reconstruction_marker"] = marker
+    config["marker_audit"] = audit
+    config["algorithm"] = "reconstruction_marker_audit"
+    return config
+
+
 def _load_reconstruction_training_curve_config(config):
     """Validate reconstruction-only FL without classifier/unlearning fields."""
 
@@ -633,7 +824,12 @@ def _load_reconstruction_training_curve_config(config):
         )
     forbidden = [
         name
-        for name in ("semantic_classifier", "unlearning", "backdoor")
+        for name in (
+            "semantic_classifier",
+            "unlearning",
+            "backdoor",
+            "reconstruction_marker",
+        )
         if name in config
     ]
     if forbidden:
@@ -891,6 +1087,17 @@ def load_fscuv4_config(path):
     """Load joint forgetting plus conflict-aware retained repair settings."""
     config = _load_federated_codec_config(path, "FSCUv4")
     unlearning = config["unlearning"]
+    if config.get("reconstruction_marker") is not None:
+        config["reconstruction_marker"] = _validate_reconstruction_marker_config(
+            config["reconstruction_marker"], config, "FSCUv4 marker experiment"
+        )
+        if int(config["reconstruction_marker"]["target_client_id"]) != int(
+            unlearning["target_client_id"]
+        ):
+            raise ValueError(
+                "reconstruction_marker.target_client_id must match "
+                "unlearning.target_client_id"
+            )
     diagnostics = config.setdefault("diagnostics", {})
     diagnostics.setdefault("evaluation_interval", 20)
     if int(diagnostics["evaluation_interval"]) <= 0:
@@ -924,6 +1131,9 @@ def load_fscuv4_config(path):
     unlearning.setdefault("lambda_decoder_preservation", 0.0)
     unlearning.setdefault("semantic_ascent", False)
     unlearning.setdefault("lambda_repair_semantic", 0.0)
+    unlearning.setdefault("lambda_posterior_mu_kd", 0.0)
+    unlearning.setdefault("lambda_posterior_logvar_kd", 0.0)
+    unlearning.setdefault("lambda_marker_outside_consistency", 0.0)
     unlearning.setdefault("repair_aggregation", "conflict_aware_projection")
     unlearning.setdefault("conflict_reference", "target_joint_unlearning_update")
     unlearning.setdefault("conflict_projection_scope", "global_client_update")
@@ -939,6 +1149,21 @@ def load_fscuv4_config(path):
         "forgetting_objective", "posterior_kl_to_original"
     )
     unlearning.setdefault("target_information_ratio_threshold", 0.0)
+    unlearning.setdefault(
+        "encoder_unlearning_max_epochs", unlearning["forgetting_epochs"]
+    )
+    unlearning.setdefault(
+        "decoder_unlearning_max_epochs", unlearning["forgetting_epochs"]
+    )
+    unlearning.setdefault(
+        "encoder_learning_rate", config["training"]["learning_rate"]
+    )
+    unlearning.setdefault(
+        "decoder_learning_rate", config["training"]["learning_rate"]
+    )
+    unlearning.setdefault("decoder_psnr_drop_db", 2.0)
+    unlearning.setdefault("lambda_encoder_proximal", 0.0)
+    unlearning.setdefault("lambda_decoder_proximal", 0.0)
     if unlearning["canonical_latent"] != "normalized_posterior_mean":
         raise ValueError(
             "FSCUv4 requires canonical_latent=normalized_posterior_mean"
@@ -995,6 +1220,7 @@ def load_fscuv4_config(path):
     if unlearning["forgetting_objective"] not in (
         "posterior_kl_to_original",
         "prior_kl_collapse",
+        "module_wise_budgeted",
     ):
         raise ValueError("unsupported FSCUv4 forgetting objective")
     information_ratio_threshold = float(
@@ -1003,6 +1229,14 @@ def load_fscuv4_config(path):
     if not 0.0 <= information_ratio_threshold < 1.0:
         raise ValueError(
             "unlearning.target_information_ratio_threshold must be in [0, 1)"
+        )
+    if (
+        unlearning["forgetting_objective"] == "module_wise_budgeted"
+        and information_ratio_threshold <= 0.0
+    ):
+        raise ValueError(
+            "module-wise budgeted unlearning requires a positive "
+            "target_information_ratio_threshold"
         )
     if float(config["training"].get("semantic_weight", 0.0)) != 0.0:
         raise ValueError(
@@ -1028,12 +1262,28 @@ def load_fscuv4_config(path):
             "lambda_repair_reconstruction",
         ),
     )
+    if unlearning["forgetting_objective"] == "module_wise_budgeted":
+        _require_positive_fields(
+            unlearning,
+            (
+                "encoder_unlearning_max_epochs",
+                "decoder_unlearning_max_epochs",
+                "encoder_learning_rate",
+                "decoder_learning_rate",
+                "decoder_psnr_drop_db",
+            ),
+        )
     for name in (
         "lambda_decoder_preservation",
         "lambda_repair_kl",
         "lambda_repair_semantic",
         "lambda_output_kd",
         "lambda_feature_kd",
+        "lambda_posterior_mu_kd",
+        "lambda_posterior_logvar_kd",
+        "lambda_marker_outside_consistency",
+        "lambda_encoder_proximal",
+        "lambda_decoder_proximal",
     ):
         if float(unlearning[name]) < 0:
             raise ValueError(f"unlearning.{name} must be non-negative")
@@ -1042,4 +1292,18 @@ def load_fscuv4_config(path):
         or bool(unlearning["run_repair_ablations"])
     ) and float(unlearning["lambda_feature_kd"]) <= 0:
         raise ValueError("feature-KD repair requires positive lambda_feature_kd")
+    marker_consistency_weight = float(
+        unlearning["lambda_marker_outside_consistency"]
+    )
+    if marker_consistency_weight > 0.0:
+        marker = config.get("reconstruction_marker")
+        if marker is None:
+            raise ValueError(
+                "marker outside-consistency repair requires reconstruction_marker"
+            )
+        if marker["protocol"] != "masked_input_marker_reconstruction_v1":
+            raise ValueError(
+                "marker outside-consistency repair requires the masked-input "
+                "marker protocol"
+            )
     return config

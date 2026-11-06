@@ -135,31 +135,52 @@ has not been directly addressed by the currently compared works.
 
 ### Required Headline Metrics
 
+- The current metric contract and implementation/verification status are recorded in
+  `docs/experiment/10-22-01-dfil-core-metrics.md`. Keep README and the method/experiment
+  summaries consistent with it; historical metric reports are not current requirements.
+- Distinguish code implemented, tests executed, and real checkpoint evaluation completed.
+  Never turn blocked Docker verification into a claim of passing tests or completed results.
+
 - Every new reconstruction federated-unlearning experiment must report the same headline
   metric set for the original, retrained-without-target, and unlearned checkpoints:
-  - `RMSE-255`: `255 * sqrt(normalized per-pixel MSE)` under paired AWGN 20 dB
-  - `PSNR`: computed from the same normalized MSE with peak value 1
-  - `FID-to-Retrain`: frozen pytorch-fid Inception pool3 (2048-D) feature-distribution
-    distance to retrain reconstructions on the same inputs and paired AWGN draws;
-    report clean test and erased train separately, lower is closer
-  - `Accuracy`: clean semantic accuracy on decoded CIFAR-10 test samples
-  - `ASR`: attack success rate on clean base-class test samples with the SCU trigger added
-  - `MIA`: reconstruction-loss membership-inference ROC-AUC
-  - `BA`: backdoor accuracy on the target client's actual poisoned erased samples
-  - `Runtime`: measured wall-clock time, with the measured phase stated explicitly
-- `BA` always means backdoor accuracy in this repository. Never abbreviate MIA balanced
-  accuracy as `BA`; write `MIA balanced accuracy` in full when it is retained as a
-  supplementary diagnostic.
+  - `MPR`: absolute marker-positive decoded-output percentage using the frozen detector;
+    report positive counts and held-out sample size, even when PUL is undefined
+  - `PUL`: percentage reduction in marker-positive decoded outputs relative to Original,
+    using one frozen detector calibrated without codec outputs
+  - `FID`: frozen pytorch-fid Inception pool3 (2048-D) distance from remaining-client
+    reconstructions to real clean remaining-client inputs
+  - `PSNR`: reconstruction-to-input PSNR with peak value 1
+  - `SSIM`: reconstruction-to-input RGB SSIM
+  - `Runtime`: measured retraining/online-unlearning wall time, excluding offline evaluation
+- All user-facing comparisons, CSVs, and figures use Original, Retrain-without-target,
+  then Unlearned/FSCUv4 order. Always include all three models for clean PSNR/SSIM,
+  erased PSNR/SSIM, and retain FID. Reference-only preparation may show only the two
+  available reference models; do not fabricate an unlearned checkpoint.
+- dFIL is supplementary, not an encoder-deletion pass/fail requirement. The current audit
+  still automatically saves clean/retain/erased dFIL, trace Monte Carlo error, sample indices,
+  observation protocol, and its separate figure for compatibility.
+- MPR applies to S1 and S2. It is marker occurrence, not SCU downstream-classifier BA.
+  For S1 also report continuous marker projection amplitude and centered NCC for all
+  three models. Preserve negative scores and separate response-pool N from detection N.
+  Local scores inspect only the fixed marker region. S1 additionally runs the registered
+  whole-image template-bank audit: global/outside amplitude and NCC, global MPR, and
+  pixel-union coverage. Save raw-only calibration/control FPR/TPR, indices, maps and figures.
+  Never tune thresholds on codec outputs or label outside-region RMSE/color residual as
+  marker-specific leakage. State the bank's limits for diffuse tint and unseen patterns.
+- IDI is superseded by dFIL. dFIL is input reconstructability, not a membership
+  test or proof of client deletion. Do not label its reciprocal as an arbitrary-attacker
+  MSE guarantee without the additional prior Fisher assumptions.
+- Do not use CKA as a core metric. Client-ID probes, custom latent/output sensitivity,
+  and FID/PSNR/SSIM-to-Retrain may remain only as legacy diagnostics. The explicitly
+  requested continuous S1 marker response is reported alongside MPR, not as deletion proof.
 - Report reconstruction results separately on the clean test set and the target-client
-  erased set. Keep normalized MSE internally for PSNR and functional-gap calculations,
-  but use RMSE-255 rather than normalized MSE as the headline reconstruction number.
+  erased set. Keep normalized MSE and RMSE-255 as internal or supplementary diagnostics.
 - A run is not a complete reported experiment until
   `src/experiments/reconstruction_channel_audit.py` has produced
-  `metrics/headline_metrics.csv`.
-  It must also save `metrics/retrain_fid.csv`, `metrics/retrain_fid_protocol.json`,
-  and `figures/retrain_fid_comparison.png`. Do not substitute ground-truth images
-  for the retrain-output reference or average minibatch FIDs. Retrain self-FID is
-  zero by construction, not evidence that deletion succeeded.
+  `metrics/selected_core_metrics.csv`, `metrics/selected_core_metrics_protocol.json`,
+  and `figures/selected_core_metrics.png`. It must also retain per-input dFIL and its protocol,
+  PUL detector protocol, and full-distribution FID protocol artifacts. Never average
+  minibatch FIDs.
   Smoke tests may exercise metric plumbing, but their values are not paper results.
 
 ### Required Visual Artifacts
@@ -197,9 +218,11 @@ has not been directly addressed by the currently compared works.
   add PSNR, MSE, reconstruction loss, or codec metrics to classifier-only runs.
 - Federated-unlearning runs must plot Original, Retrain-without-target, and Unlearned
   side by side using separate panels/scales for:
-  - clean and erased reconstruction utility, including RMSE-255 and PSNR
-  - clean and erased FID-to-Retrain in dedicated panels, with sample counts
-  - Accuracy, ASR, MIA, and BA when those metrics are defined for the scenario
+  - clean and erased PSNR and SSIM
+  - retain FID to real retain inputs
+  - marker MPR and PUL when a marker protocol is defined
+  - continuous marker amplitude/NCC, especially for S1
+  - supplementary encoder dFIL on clean/retain/erased inputs in its own figure
   - retraining and online-unlearning Runtime
   - stage-wise forgetting/repair loss curves when the method performs iterative
     optimization
@@ -254,8 +277,8 @@ has not been directly addressed by the currently compared works.
 
 - Always compare against the full retraining baseline without the target client.
 - Include both utility and unlearning metrics.
-- Utility metrics should include reconstruction quality, such as MSE, PSNR, MS-SSIM, LPIPS, and client-level variance when available.
-- Unlearning metrics should prioritize functional gap to the retrained-without-client codec, membership inference attack, and latent client-identity leakage.
+- Utility metrics should prioritize PSNR, SSIM, and retain FID.
+- Encoder latent privacy uses dFIL; decoded marker removal uses PUL.
 - Backdoor or client marker experiments are useful diagnostics, but they are not sufficient alone.
 - Include ablations for:
   - encoder-only unlearning
@@ -292,7 +315,8 @@ has not been directly addressed by the currently compared works.
   contrastive-compensation method. `FSCUv4` names joint forgetting followed by
   retained-client repair and client-wise conflict-aware projection aggregation.
 - One `FSCU` invocation must run unlearning and then automatically write the full
-  registered headline suite: RMSE-255, PSNR, FID-to-Retrain, Accuracy, ASR, MIA, BA, and Runtime.
+  registered core suite: MPR, PUL, FID, PSNR, SSIM, and Runtime, plus the currently
+  retained supplementary dFIL and continuous marker response artifacts.
   Separate audit entry points are optional tools for old checkpoints, not steps in
   the normal FSCU workflow.
 - Put experimental code under `src/`.

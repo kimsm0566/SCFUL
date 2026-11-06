@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -6,9 +7,13 @@ import torch
 
 from src.evaluation.posterior_audit import ClientGaussianSummary
 from src.utils.plotting import (
+    save_client_partition_figure,
+    save_encoder_retrain_gap_figure,
     save_federated_classification_curve_figures,
     save_federated_training_curve_figures,
     save_oracle_figures,
+    save_selected_core_metrics_figure,
+    save_target_client_class_distribution_figure,
 )
 
 
@@ -61,6 +66,105 @@ def make_minimal_oracle_prediction_fixture():
 
 
 class PlottingTests(unittest.TestCase):
+    def test_selected_core_metric_figure_uses_nonempty_registered_rows(self):
+        rows = [
+            {
+                "model": model,
+                "output_pul_percent": pul,
+                "output_marker_positive_percent": (50.0, 0.0, 1.0)[position],
+                "retain_fid_to_real": 20.0 + position,
+                "clean_psnr_db": 28.0 + position,
+                "erased_psnr_db": 27.5 + position,
+                "clean_ssim": 0.90 + 0.01 * position,
+                "erased_ssim": 0.89 + 0.01 * position,
+                "clean_dfil": idi + 1,
+                "retain_dfil": idi + 2,
+                "erased_dfil": idi + 0.5,
+                "running_time_seconds": 10 + position,
+            }
+            for position, (model, pul, idi) in enumerate(
+                (
+                    ("original", 0.0, 1.0),
+                    ("retrain_without_client_0", 100.0, 0.0),
+                    ("FSCUv4", 80.0, 0.2),
+                )
+            )
+        ]
+        with TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            with mock.patch("src.utils.plotting.plt.close") as close_figure:
+                save_selected_core_metrics_figure(list(reversed(rows)), output_dir)
+                figure = close_figure.call_args.args[0]
+            try:
+                expected_order = [row["model"] for row in rows]
+                for axis in figure.axes:
+                    self.assertEqual(
+                        [tick.get_text() for tick in axis.get_xticklabels()], expected_order
+                    )
+                self.assertEqual(
+                    [bar.get_height() for bar in figure.axes[0].patches],
+                    [50.0, 0.0, 1.0],
+                )
+                self.assertEqual(len(figure.axes[3].containers), 2)
+                self.assertEqual(len(figure.axes[4].containers), 2)
+                self.assertIn("fixed-region", figure.axes[0].get_title())
+            finally:
+                import matplotlib.pyplot as plt
+                plt.close(figure)
+            output = output_dir / "selected_core_metrics.png"
+            self.assertTrue(output.is_file())
+            self.assertGreater(output.stat().st_size, 0)
+
+    def test_encoder_retrain_gap_figure_is_backed_by_all_four_metrics(self):
+        rows = []
+        for position, model in enumerate(("original", "retrain", "unlearned")):
+            value = float(position) * 0.01
+            rows.append(
+                {
+                    "model": model,
+                    "clean_latent_mean_mse_to_retrain": value,
+                    "erased_latent_mean_mse_to_retrain": value + 0.01,
+                    "clean_posterior_symmetric_kl_to_retrain": value + 0.02,
+                    "erased_posterior_symmetric_kl_to_retrain": value + 0.03,
+                }
+            )
+        with TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            save_encoder_retrain_gap_figure(rows, output_dir)
+
+            self.assertTrue(
+                (output_dir / "encoder_retrain_gap_comparison.png").is_file()
+            )
+
+    def test_target_client_distribution_writes_csv_ready_rows_and_figures(self):
+        manifest = {
+            "partition": "equal_size_dirichlet",
+            "class_labels": [0, 1, 2],
+            "clients": [
+                {"client_id": 0, "train_label_count": [5, 4, 1]},
+                {"client_id": 1, "train_label_count": [1, 2, 7]},
+            ],
+        }
+        with TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            save_client_partition_figure(
+                manifest, output_dir, target_client_id=1
+            )
+            rows = save_target_client_class_distribution_figure(
+                manifest, 1, output_dir
+            )
+
+            self.assertTrue(
+                (output_dir / "client_class_distribution.png").is_file()
+            )
+            self.assertTrue(
+                (output_dir / "target_client_class_distribution.png").is_file()
+            )
+            self.assertEqual([row["train_examples"] for row in rows], [1, 2, 7])
+            self.assertEqual(rows[2]["class_name"], "bird")
+            self.assertEqual(rows[2]["rank_by_count"], 1)
+            self.assertAlmostEqual(rows[2]["train_fraction"], 0.7)
+
     def test_save_oracle_figures_writes_all_three_png_files(self):
         predictions, summaries = make_minimal_oracle_prediction_fixture()
         with TemporaryDirectory() as directory:

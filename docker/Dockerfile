@@ -7,7 +7,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
-        ca-certificates git python-is-python3 python3 python3-pip \
+        ca-certificates git libopenmpi-dev openmpi-bin \
+        python-is-python3 python3 python3-dev python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 RUN --mount=type=cache,target=/root/.cache/pip \

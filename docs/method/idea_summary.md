@@ -14,6 +14,25 @@ Multiple clients train this codec through federated learning. When client `u` re
 
 ## Correct Unlearning Objective
 
+### Current evaluation agreement (2026-11-02)
+
+핵심 평가 지표는 PSNR, SSIM, retain FID, marker MPR/PUL, Runtime이다.
+모든 표와 figure는 Original, Retrain-without-target, Unlearned(FSCUv4) 순서이며,
+clean/erased PSNR·SSIM과 retain FID를 세 모델 모두 보고한다. MPR은 frozen detector의
+절대 검출률로 건수와 N을 함께 표시한다. S1은 연속 marker projection 강도와 NCC도
+함께 보고한다. S1/S2에는 고정 위치뿐 아니라 raw-calibrated template-bank의 전역/outside
+반응과 검출 픽셀 합집합 coverage를 추가한다. 임의 색 번짐이나 삭제 증명으로 해석하지 않는다.
+Local MPR v2는 raw clean 최대 반응을 기준으로 하며 이전 midpoint 결과와 구분한다.
+Amplitude/NCC는 같은 held-out 500장의 실제 측정값으로 보고하며 0/100점 환산은 하지 않는다.
+dFIL은 보조적인 encoder 입력 민감도 진단이며 별도의 인코더 삭제 합격 조건이 아니다.
+정의·구현 위치·검증 상태는
+[확정 지표 구현](../experiment/10-22-01-dfil-core-metrics.md)을 단일 기준으로 사용한다.
+이하 과거 탐색 결과의 client-ID/latent gap 등은 역사적 진단이며 현재 핵심 지표가 아니다.
+dFIL은 입력에 대한 Fisher로, 학습 parameter의 diagonal Fisher와 다르다.
+낮은 dFIL이나 높은 PUL 하나로 client 삭제를 증명하지 않고 retraining 기준과
+retained utility를 함께 해석한다. 최근 논의한 Fisher 기반 joint forgetting은
+설계 가설이며, 이번 평가 구현이 그 방법론을 구현하거나 검증한 것은 아니다.
+
 The goal is not to make target-client reconstruction fail arbitrarily.
 
 The goal is:

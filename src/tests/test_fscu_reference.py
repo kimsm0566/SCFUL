@@ -116,6 +116,72 @@ def test_fscu_reference_rejects_different_client_split(tmp_path):
         )
 
 
+def test_fscu_reference_accepts_corrected_remaining_observer_pool_hash(tmp_path):
+    config = load_fscu_config(SMOKE_CONFIG)
+    config["training"]["semantic_weight"] = 0.0
+    identity = {
+        "state_sha256": "state-hash",
+        "source_checkpoint_sha256": "checkpoint-hash",
+        "remaining_observer_protocol_sha256": "protocol-hash",
+    }
+    legacy_observer = {
+        **identity,
+        "source_run": "/workspace/outputs/legacy-observer",
+        "source_run_workspace_relative": "outputs/legacy-observer",
+        "source_checkpoint": "/workspace/outputs/legacy-observer/checkpoints/observer.pt",
+        "source_split_training_pool_index_sha256": "remaining-only-hash",
+        "current_split_training_pool_index_sha256": "full-pool-hash",
+        "source_pool_matches_current_training_pool": False,
+    }
+    corrected_observer = {
+        **legacy_observer,
+        "source_split_training_pool_index_sha256": "full-pool-hash",
+        "source_pool_matches_current_training_pool": True,
+    }
+    stored_split = {
+        "partition": "test",
+        "clients": [0, 1],
+        "semantic_classifier_training": legacy_observer,
+    }
+    current_split = copy.deepcopy(stored_split)
+    current_split["semantic_classifier_training"] = corrected_observer
+    run_dir = _make_reference_run(tmp_path, config, stored_split)
+
+    loaded = load_fscu_reference_models(
+        run_dir,
+        config,
+        current_split,
+        make_initial_fscu_state(config, 0),
+        seed=0,
+    )
+
+    assert loaded["reference_manifest_verified"] is True
+
+
+def test_fscu_reference_accepts_added_null_input_mask_metadata(tmp_path):
+    config = load_fscu_config(SMOKE_CONFIG)
+    stored_split = {
+        "partition": "test",
+        "clients": [0, 1],
+        "target_client_reconstruction_marker": {
+            "protocol": "unconditional_output_watermark_v1"
+        },
+    }
+    current_split = copy.deepcopy(stored_split)
+    current_split["target_client_reconstruction_marker"]["input_mask"] = None
+    run_dir = _make_reference_run(tmp_path, config, stored_split)
+
+    loaded = load_fscu_reference_models(
+        run_dir,
+        config,
+        current_split,
+        make_initial_fscu_state(config, 0),
+        seed=0,
+    )
+
+    assert loaded["reference_manifest_verified"] is True
+
+
 def test_fscu_reference_rejects_joint_head_schema_one_reference(tmp_path):
     config = load_fscu_config(SMOKE_CONFIG)
     split_manifest = {"partition": "test", "clients": [0, 1]}

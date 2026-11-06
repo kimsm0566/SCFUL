@@ -9,8 +9,16 @@ import torch
 import torch.nn.functional as functional
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.data.data import augment_cifar10_contrastive_batch
-from src.utils.loss import normalized_feature_distillation_loss
+from src.data.data import (
+    ReconstructionMarkerClientData,
+    apply_reconstruction_input_mask,
+    augment_cifar10_contrastive_batch,
+)
+from src.utils.loss import (
+    normalized_feature_distillation_loss,
+    outside_marker_consistency_loss,
+    posterior_parameter_distillation_losses,
+)
 
 
 class LocalReconstructionConfig:
@@ -121,6 +129,10 @@ class RetainedFeatureKDConfig:
         semantic_weight,
         output_kd_weight,
         feature_kd_weight,
+        posterior_mu_kd_weight=0.0,
+        posterior_logvar_kd_weight=0.0,
+        marker_outside_consistency_weight=0.0,
+        marker_config=None,
         reconstruction_reduction="batchmean_sum",
         device="cpu",
     ):
@@ -133,6 +145,24 @@ class RetainedFeatureKDConfig:
         self.semantic_weight = semantic_weight
         self.output_kd_weight = output_kd_weight
         self.feature_kd_weight = feature_kd_weight
+        self.posterior_mu_kd_weight = posterior_mu_kd_weight
+        self.posterior_logvar_kd_weight = posterior_logvar_kd_weight
+        self.marker_outside_consistency_weight = marker_outside_consistency_weight
+        self.marker_config = marker_config
+        for name, value in (
+            ("posterior_mu_kd_weight", posterior_mu_kd_weight),
+            ("posterior_logvar_kd_weight", posterior_logvar_kd_weight),
+            (
+                "marker_outside_consistency_weight",
+                marker_outside_consistency_weight,
+            ),
+        ):
+            if not math.isfinite(float(value)) or float(value) < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if float(marker_outside_consistency_weight) > 0.0 and marker_config is None:
+            raise ValueError(
+                "marker_config is required when marker consistency is enabled"
+            )
         if reconstruction_reduction not in ("elementwise_mean", "batchmean_sum"):
             raise ValueError(
                 "reconstruction_reduction must be elementwise_mean or batchmean_sum"
@@ -150,6 +180,30 @@ def _make_loader(client_data, batch_size, seed):
     generator = torch.Generator(device="cpu").manual_seed(seed)
     return DataLoader(
         TensorDataset(images, labels),
+        batch_size=batch_size,
+        shuffle=True,
+        generator=generator,
+        num_workers=0,
+    )
+
+
+def _make_reconstruction_loader(client_data, batch_size, seed):
+    if isinstance(client_data, ReconstructionMarkerClientData):
+        images = client_data.inputs
+        targets = client_data.targets
+        labels = client_data.labels
+        tensors = (images, targets, labels, client_data.loss_weights)
+    else:
+        images, labels = client_data
+        images = torch.as_tensor(images, dtype=torch.float32)
+        labels = torch.as_tensor(labels, dtype=torch.long)
+        if images.max() > 1.0:
+            images = images / 255.0
+        targets = images
+        tensors = (images, targets, labels)
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    return DataLoader(
+        TensorDataset(*tensors),
         batch_size=batch_size,
         shuffle=True,
         generator=generator,
@@ -425,7 +479,12 @@ def train_local_reconstruction_with_optimizer_state(
         optimizer.load_state_dict(deepcopy(optimizer_state))
         for parameter_group in optimizer.param_groups:
             parameter_group["lr"] = float(config.learning_rate)
-    loader = _make_loader(client_data, config.batch_size, seed)
+    if (
+        isinstance(client_data, ReconstructionMarkerClientData)
+        and config.augmentation != "none"
+    ):
+        raise ValueError("paired reconstruction marker data requires augmentation=none")
+    loader = _make_reconstruction_loader(client_data, config.batch_size, seed)
     posterior_generator = _make_generator(device, seed + 1)
     channel_generator = _make_generator(device, seed + 2)
     augmentation_generator = _make_generator(device, seed + 3)
@@ -441,8 +500,15 @@ def train_local_reconstruction_with_optimizer_state(
     processed_elements = 0
     steps = 0
     for _ in range(config.local_epochs):
-        for images, labels in loader:
+        for batch in loader:
+            if len(batch) == 4:
+                images, reconstruction_targets, labels, loss_weights = batch
+                loss_weights = loss_weights.to(device)
+            else:
+                images, reconstruction_targets, labels = batch
+                loss_weights = None
             images = images.to(device)
+            reconstruction_targets = reconstruction_targets.to(device)
             if config.semantic_weight > 0:
                 labels = labels.to(device)
             if config.augmentation == "cifar10_crop_flip_v1":
@@ -454,6 +520,7 @@ def train_local_reconstruction_with_optimizer_state(
                         config.augmentation_horizontal_flip_probability
                     ),
                 )
+                reconstruction_targets = images
             output = local_model(
                 images,
                 mode="training",
@@ -462,16 +529,20 @@ def train_local_reconstruction_with_optimizer_state(
                 channel_generator=channel_generator,
             )
             batch_examples = len(images)
-            squared_error = functional.mse_loss(
-                output.reconstruction,
-                images,
-                reduction="sum",
-            )
+            elementwise_squared_error = (
+                output.reconstruction - reconstruction_targets
+            ).square()
+            squared_error = elementwise_squared_error.sum()
+            weighted_squared_error = squared_error
+            if loss_weights is not None:
+                weighted_squared_error = (
+                    elementwise_squared_error * loss_weights
+                ).sum()
             train_mse = squared_error / images.numel()
             if config.kl_reduction == "batchmean_sum":
-                reconstruction_loss = squared_error / batch_examples
+                reconstruction_loss = weighted_squared_error / batch_examples
             else:
-                reconstruction_loss = train_mse
+                reconstruction_loss = weighted_squared_error / images.numel()
             kl_loss = local_model.prior_kl(output.posterior)
             loss = config.reconstruction_weight * reconstruction_loss + config.beta * kl_loss
             if config.semantic_weight > 0:
@@ -523,6 +594,14 @@ def train_local_reconstruction_with_optimizer_state(
         "learning_rate": float(config.learning_rate),
         "gradient_clip_norm": config.gradient_clip_norm,
         "kl_reduction": config.kl_reduction,
+        "paired_reconstruction_targets": isinstance(
+            client_data, ReconstructionMarkerClientData
+        ),
+        "marker_region_loss_weight": (
+            float(client_data.metadata["marker_region_loss_weight"])
+            if isinstance(client_data, ReconstructionMarkerClientData)
+            else 1.0
+        ),
     }
     return (
         copy_model_state(local_model),
@@ -693,7 +772,13 @@ def train_local_retained_feature_kd(
     uses_teacher = bool(
         float(config.output_kd_weight) > 0.0
         or float(config.feature_kd_weight) > 0.0
+        or float(config.posterior_mu_kd_weight) > 0.0
+        or float(config.posterior_logvar_kd_weight) > 0.0
     )
+    uses_marker_consistency = bool(
+        float(config.marker_outside_consistency_weight) > 0.0
+    )
+    uses_paired_mean_path = uses_teacher or uses_marker_consistency
     if uses_teacher and original_teacher is None:
         raise ValueError("a frozen Original teacher is required for KD repair")
     teacher = None
@@ -723,6 +808,9 @@ def train_local_retained_feature_kd(
         "output_kd_loss": 0.0,
         "encoder_feature_kd_loss": 0.0,
         "decoder_feature_kd_loss": 0.0,
+        "posterior_mu_kd_loss": 0.0,
+        "posterior_logvar_kd_loss": 0.0,
+        "marker_outside_consistency_loss": 0.0,
         "total_loss": 0.0,
     }
     semantic_correct = 0
@@ -735,20 +823,23 @@ def train_local_retained_feature_kd(
         for images, labels in loader:
             images = images.to(device)
             labels = labels.to(device)
-            if uses_teacher:
+            if uses_paired_mean_path:
                 standard_noise = torch.randn(
                     (len(images), latent_dim),
                     dtype=images.dtype,
                     device=device,
                     generator=channel_generator,
                 )
-                with torch.no_grad():
-                    teacher_output = teacher(
-                        images,
-                        mode="distillation",
-                        standard_noise=standard_noise,
-                        snr_db=float(config.snr_db),
-                    )
+                if uses_teacher:
+                    with torch.no_grad():
+                        teacher_output = teacher(
+                            images,
+                            mode="distillation",
+                            standard_noise=standard_noise,
+                            snr_db=float(config.snr_db),
+                        )
+                else:
+                    teacher_output = None
                 student_output = local_model(
                     images,
                     mode="distillation",
@@ -793,17 +884,52 @@ def train_local_retained_feature_kd(
                     student_output.decoder_shallow,
                     teacher_output.decoder_shallow,
                 )
+                posterior_mu_loss, posterior_logvar_loss = (
+                    posterior_parameter_distillation_losses(
+                        student_output.posterior,
+                        teacher_output.posterior,
+                    )
+                )
             else:
                 encoder_feature_loss = torch.zeros((), device=device)
                 decoder_feature_loss = torch.zeros((), device=device)
+                posterior_mu_loss = torch.zeros((), device=device)
+                posterior_logvar_loss = torch.zeros((), device=device)
             feature_kd_loss = 0.5 * (
                 encoder_feature_loss + decoder_feature_loss
             )
+            marker_consistency_loss = torch.zeros((), device=device)
+            if uses_marker_consistency:
+                probe_images = apply_reconstruction_input_mask(
+                    images, config.marker_config
+                )
+                probe_output = local_model(
+                    probe_images,
+                    mode="distillation",
+                    standard_noise=standard_noise,
+                    snr_db=float(config.snr_db),
+                )
+                marker_region = config.marker_config["output_watermark"]
+                marker_consistency_loss = outside_marker_consistency_loss(
+                    probe_output.reconstruction,
+                    student_output.reconstruction,
+                    (
+                        marker_region["top"],
+                        marker_region["left"],
+                        marker_region["height"],
+                        marker_region["width"],
+                    ),
+                )
             loss = (
                 float(config.reconstruction_weight) * reconstruction_loss
                 + float(config.beta) * prior_kl_loss
                 + float(config.output_kd_weight) * output_kd_loss
                 + float(config.feature_kd_weight) * feature_kd_loss
+                + float(config.posterior_mu_kd_weight) * posterior_mu_loss
+                + float(config.posterior_logvar_kd_weight)
+                * posterior_logvar_loss
+                + float(config.marker_outside_consistency_weight)
+                * marker_consistency_loss
             )
 
             semantic_loss = torch.zeros((), device=device)
@@ -840,6 +966,15 @@ def train_local_retained_feature_kd(
             totals["decoder_feature_kd_loss"] += (
                 float(decoder_feature_loss.detach().cpu()) * batch_examples
             )
+            totals["posterior_mu_kd_loss"] += (
+                float(posterior_mu_loss.detach().cpu()) * batch_examples
+            )
+            totals["posterior_logvar_kd_loss"] += (
+                float(posterior_logvar_loss.detach().cpu()) * batch_examples
+            )
+            totals["marker_outside_consistency_loss"] += (
+                float(marker_consistency_loss.detach().cpu()) * batch_examples
+            )
             totals["total_loss"] += float(loss.detach().cpu()) * batch_examples
             processed_examples += batch_examples
             steps += 1
@@ -860,6 +995,13 @@ def train_local_retained_feature_kd(
             "steps": steps,
             "output_kd_weight": float(config.output_kd_weight),
             "feature_kd_weight": float(config.feature_kd_weight),
+            "posterior_mu_kd_weight": float(config.posterior_mu_kd_weight),
+            "posterior_logvar_kd_weight": float(
+                config.posterior_logvar_kd_weight
+            ),
+            "marker_outside_consistency_weight": float(
+                config.marker_outside_consistency_weight
+            ),
             "teacher_scope": (
                 "original_global_on_local_retained_data_only"
                 if uses_teacher
@@ -869,6 +1011,12 @@ def train_local_retained_feature_kd(
                 "same_standard_awgn_draw" if uses_teacher else "standard_training_awgn"
             ),
             "latent_source": "normalized_posterior_mean",
+            "posterior_kd": "raw_mu_and_logvar_elementwise_mse",
+            "marker_consistency": (
+                "same_awgn_outside_marker_sse_per_example"
+                if uses_marker_consistency
+                else "disabled"
+            ),
             "reconstruction_reduction": config.reconstruction_reduction,
             "uses_target_data": False,
         }

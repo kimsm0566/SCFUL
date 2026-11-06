@@ -13,9 +13,45 @@ x -> encoder -> power-normalized channel -> decoder -> x_hat
 -> retained client의 distributed repair -> retrain equivalence 평가
 ```
 
-현재 구현된 controlled Non-IID Oracle Behavior 실험은 proposed federated method가
-아닌 centralized comparator다. Original, retrain-without-target oracle, SCU-style
-adaptation의 output/posterior functional gap을 먼저 측정한다.
+현재 구현된 federated 기준선은 `FSCU`와 `FSCUv4`다. 별도의 controlled Non-IID
+Oracle Behavior 실험은 centralized comparator이며 제안 방법과 구분한다.
+
+## 현재 확정 지표와 구현 상태 (2026-11-02)
+
+| 목적 | 핵심 지표 | 평가 대상 |
+| --- | --- | --- |
+| 복원 품질 | PSNR, SSIM | clean test / erased train 각각 입력 대비 복원 |
+| 출력 분포 품질 | FID (retain u-FID) | remaining-client clean 입력과 복원 분포 |
+| 마커 절대 검출 | MPR (%) | frozen detector의 양성 건수 / held-out 입력 수; 건수와 N도 함께 보고 |
+| 마커 제거 | PUL | Original 대비 frozen detector의 검출 빈도 감소 |
+| 효율 | Runtime | retraining 및 online unlearning 시간, 평가 시간 제외 |
+
+IDI·CKA·MIA·client-ID 및 custom sensitivity/projection은 핵심 지표가 아니다.
+FID/PUL/PSNR/SSIM은 전체 codec 출력 평가이며 decoder 단독 삭제 증명이 아니다.
+dFIL은 보조적인 입력 복원 가능성 진단이며 client 삭제 합격 기준이 아니다.
+모든 비교 순서는 **Original / Retrain-without-target / Unlearned(FSCUv4)**로 고정한다.
+Clean PSNR·SSIM, erased PSNR·SSIM, retain FID를 세 모델 모두 동일 조건에서 보고한다.
+S1/S2 모두 MPR을 계산하며, Original 검출이 0이면 MPR=0이어도 PUL은 undefined다.
+S1은 연속 marker projection 강도와 NCC도 함께 보고한다. 지정된 마커 위치의
+local MPR과 별도로 S1의 whole-image template-bank 평가를 자동 실행한다.
+Global/outside amplitude·NCC, global MPR, 검출 픽셀 합집합 면적과 공통 범위 heatmap을
+저장한다. 원본 이미지로만 threshold를 보정하고 shifted-marker 대조군의 TPR/FPR도
+보고한다. 이는 임의 색 번짐이나 client 삭제를 보장하는 검사가 아니다.
+
+사용자 비교 표에서는 Local/Global/outside **amplitude와 NCC를 실제 측정값 그대로**
+표시한다. Original=100점, Retrain=0점 환산은 폐기했다. 기준점 차이로 측정값을
+NA 처리하지 않는다. MPR/PUL/coverage의 %, PSNR의 dB, SSIM/FID 원래 값, Runtime의
+초도 유지한다. 같은 held-out 500장의 raw mean/SE 자동 CSV/figure를 생성한다.
+Local MPR은 raw clean 최대 반응 기준으로 검사하며,
+기존 midpoint 기준 결과는 v1으로 보존한다. Global은 raw clean 99% 분위수 기준이며
+S1/S2 모두 검사한다. 상세 규칙과 검증 상태는 확정 지표 문서를 따른다.
+
+계산 코드, config, CSV/JSON, 자동 figure 및 reference 저장 연결은 구현되어 있다.
+MPR 보고·비교 순서 변경의 테스트와 실제 checkpoint 재평가는 구분한다.
+기존 checkpoint를 재학습하거나 기존 결과를 덮어쓰지 않는다. 재평가는 새 output root에 저장한다.
+구현 상태와 재현 절차의 기준 문서는
+[확정 지표·구현 현황](docs/experiment/10-22-01-dfil-core-metrics.md)이다.
+이 절이 아래의 과거 headline 설명보다 우선한다.
 
 CIFAR-10 본 실험은 reconstruction 전용 `VariationalDeepJSCC` codec과 별도
 `Cifar10Classifier`를 사용한다. Codec은 원본 DeepJSCC의 5-layer convolutional
@@ -107,7 +143,7 @@ canonical latent로 만든다.
 Initial, Original, Retrain checkpoint를 재사용할 수 있다.
 
 ```bash
-docker exec scful-dev bash -lc 'cd /workspace && \
+docker compose exec -T scful-dev bash -lc 'cd /workspace && \
   mpirun --allow-run-as-root --oversubscribe -np 11 \
   python src/main.py --algorithm FSCU \
   --config src/configs/federated_cifar10_vdeepjscc_scu_public_compensation_smoke.json \
@@ -117,7 +153,7 @@ docker exec scful-dev bash -lc 'cd /workspace && \
 학습 checkpoint를 재사용하고 unlearning부터 실행하는 명령은 다음과 같다.
 
 ```bash
-docker exec scful-dev bash -lc 'cd /workspace && \
+docker compose exec -T scful-dev bash -lc 'cd /workspace && \
   mpirun --allow-run-as-root --oversubscribe -np 11 \
   python src/main.py --algorithm FSCU \
   --config src/configs/federated_cifar10_vdeepjscc_scu_public_compensation_smoke.json \
@@ -142,11 +178,13 @@ raw image로 classifier를 새로 연합학습한다. Local validation CE로 선
 않는다. Classifier를 사용하는 run은 raw-test accuracy, data index hash,
 state hash를 `semantic_classifier/`와 `split_manifest.json`에 기록한다.
 
-FSCU가 끝나면 `metrics/headline_metrics.csv`에 RMSE-255, PSNR, Accuracy,
-ASR, MIA, BA, Runtime이 모두 저장된다. 별도 metric 명령은 과거 checkpoint를
-다시 분석할 때만 사용하는 보조 경로다.
-Original 및 retrain 학습 중에는 매 round의 train MSE, train PSNR, train accuracy,
-objective/reconstruction/KL/semantic loss가 terminal과 `run.log`에 동시에 기록된다.
+FSCU/FSCUv4 평가의 핵심 결과는 `metrics/selected_core_metrics.csv`와
+`metrics/selected_core_metrics_protocol.json`, `figures/selected_core_metrics.png`다.
+기존 `headline_metrics.csv`의 Accuracy/ASR/MIA/BA 등은 legacy diagnostic이다.
+별도 audit는 과거 checkpoint를 다시 분석할 때 사용한다.
+Original 및 retrain 학습 중에는 매 round의 train MSE, train PSNR,
+objective/reconstruction/KL loss가 terminal과 `run.log`에 동시에 기록된다.
+Semantic 지표는 frozen observer를 명시적으로 평가할 때만 기록한다.
 Held-out 평가가 설정된 round에는 `test_*` 이름으로 구분해 함께 기록한다.
 
 현재 이름 규칙에서 `FSCU`는 public-data compensation 기준선이고, `FSCUv4`는

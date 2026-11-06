@@ -8,11 +8,14 @@ import pytest
 import torch
 
 from src.data.data import load_cifar10_test_dataset, select_cifar10_client_data
-from src.evaluation.federated_behavior import evaluate_codec_states
+from src.evaluation.federated_behavior import (
+    evaluate_codec_states,
+    evaluate_retain_ufid_states,
+)
 from src.models.semantic_codec import VariationalDeepJSCC, VariationalDeepJSCCConfig
 from src.utils.artifacts import RunArtifacts
 from src.utils.fid import FeatureMoments, InceptionFIDFeatures, fid_from_moments
-from src.utils.plotting import save_retrain_fid_figure
+from src.utils.plotting import save_retain_ufid_figure, save_retrain_fid_figure
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -114,6 +117,35 @@ def test_codec_fid_uses_retrain_outputs_and_shared_awgn_without_changing_psnr():
     assert not torch.allclose(features.seen[0], torch.as_tensor(data[0][:4]).float())
     assert result["protocol"]["fid"]["reference_model"] == "retrain_without_client_0"
     assert "fid_to_retrain" not in result["per_class"][0]
+
+
+def test_retain_ufid_uses_real_retain_inputs_as_reference(tmp_path):
+    config = VariationalDeepJSCCConfig(latent_channels=1, latent_dim=64)
+    model = VariationalDeepJSCC(config)
+    state = model.state_dict()
+    identical = {name: tensor.clone() for name, tensor in state.items()}
+    features = DiagnosticFeatures()
+    rows, protocol = evaluate_retain_ufid_states(
+        model_factory=lambda: VariationalDeepJSCC(config),
+        model_states={"original": state, "identical": identical},
+        retain_data=real_cifar_data(6),
+        batch_size=3,
+        device="cpu",
+        snr_db=20.0,
+        seed=9,
+        fid_features=features,
+    )
+    by_name = {row["model"]: row for row in rows}
+    assert by_name["original"]["retain_ufid"] == pytest.approx(
+        by_name["identical"]["retain_ufid"]
+    )
+    assert by_name["original"]["retain_ufid"] >= 0
+    assert protocol["reference_images"] == (
+        "the same real clean remaining-client inputs"
+    )
+    assert protocol["metric"] == "retain_uFID"
+    save_retain_ufid_figure(rows, tmp_path)
+    assert (tmp_path / "retain_ufid_comparison.png").stat().st_size > 0
 
 
 def test_pretrained_inception_real_cifar_features_are_frozen_and_reproducible():

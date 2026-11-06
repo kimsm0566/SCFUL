@@ -16,6 +16,8 @@ def args_parser(argv=None):
             "membership_inference_audit",
             "support_response",
             "training_curves",
+            "reconstruction_marker_audit",
+            "reconstruction_visualization",
             "remaining_classifier",
         ],
         default="scu",
@@ -102,6 +104,14 @@ def args_parser(argv=None):
         "--in-place",
         action="store_true",
         help="Write reconstruction channel audit files into the source run.",
+    )
+    parser.add_argument(
+        "--audit-reference-only",
+        action="store_true",
+        help=(
+            "For a reconstruction channel audit, evaluate only Original and "
+            "Retrain-without-target checkpoints."
+        ),
     )
     parser.add_argument("--smoke", "--smoke-test", action="store_true")
 

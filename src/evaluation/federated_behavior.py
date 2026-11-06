@@ -414,3 +414,100 @@ def evaluate_codec_states(
     if semantic_classifier is not None:
         result["semantic_logits"] = {name: torch.cat(chunks) for name, chunks in logit_chunks.items()}
     return result
+
+
+def evaluate_retain_ufid_states(
+    model_factory,
+    model_states,
+    retain_data,
+    batch_size,
+    device,
+    snr_db,
+    seed,
+    fid_features,
+):
+    """Compute FID from retain reconstructions to the real retain inputs."""
+
+    if fid_features is None:
+        raise ValueError("retain u-FID requires a frozen FID feature extractor")
+    if batch_size <= 0:
+        raise ValueError("retain u-FID batch_size must be positive")
+    images, labels = retain_data
+    images = torch.as_tensor(images, dtype=torch.float32)
+    labels = torch.as_tensor(labels, dtype=torch.long)
+    if images.max() > 1.0:
+        images = images / 255.0
+    if len(images) < 2 or len(images) != len(labels):
+        raise ValueError("retain u-FID needs at least two aligned images and labels")
+    device = torch.device(device)
+    models = {}
+    for name, state in model_states.items():
+        model = model_factory().to(device)
+        model.load_state_dict(state)
+        model.eval()
+        models[name] = model
+    real_moments = FeatureMoments()
+    reconstruction_moments = {name: FeatureMoments() for name in models}
+    noise_generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    with torch.no_grad():
+        for start in range(0, len(images), int(batch_size)):
+            batch = images[start : start + int(batch_size)].to(device)
+            real_moments.update(fid_features(batch))
+            first_model = next(iter(models.values()))
+            posterior = first_model(batch, mode="posterior")
+            standard_noise = torch.randn(
+                posterior.mu.shape,
+                dtype=posterior.mu.dtype,
+                generator=noise_generator,
+            )
+            for name, model in models.items():
+                reconstruction = model(
+                    batch,
+                    mode="paired_awgn",
+                    standard_noise=standard_noise,
+                    snr_db=float(snr_db),
+                ).reconstruction
+                reconstruction_moments[name].update(
+                    fid_features(reconstruction)
+                )
+    class_counts = {
+        int(label): int((labels == label).sum())
+        for label in torch.unique(labels, sorted=True)
+    }
+    rows = [
+        {
+            "model": name,
+            "retain_ufid": fid_from_moments(moments, real_moments),
+            "reference_distribution": "real_clean_remaining_client_images",
+            "samples": int(real_moments.count),
+            "feature_dimensions": int(
+                fid_features.metadata["feature_dimensions"]
+            ),
+            "evaluation_channel": "paired_awgn_posterior_mean",
+            "evaluation_snr_db": float(snr_db),
+            "evaluation_seed": int(seed),
+            "rank_deficient_sample_count": (
+                real_moments.count
+                <= int(fid_features.metadata["feature_dimensions"])
+            ),
+        }
+        for name, moments in reconstruction_moments.items()
+    ]
+    protocol = {
+        **fid_features.metadata,
+        "metric": "retain_uFID",
+        "candidate_images": "codec reconstructions of the selected clean remaining-client inputs",
+        "reference_images": "the same real clean remaining-client inputs",
+        "channel": "paired AWGN across models",
+        "snr_db": float(snr_db),
+        "seed": int(seed),
+        "samples_per_distribution": int(real_moments.count),
+        "class_counts": class_counts,
+        "direction": "lower is better retain reconstruction distribution quality",
+        "distinction_from_fid_to_retrain": "ground-truth retain inputs are the reference here; retrain outputs are the reference for FID-to-Retrain",
+        "rank_deficient_sample_count": (
+            real_moments.count
+            <= int(fid_features.metadata["feature_dimensions"])
+        ),
+    }
+    return rows, protocol

@@ -53,6 +53,26 @@ def test_variational_deepjscc_has_published_cnn_topology_and_v3_shapes():
     assert not any(name.startswith("approximator.") for name in model.state_dict())
 
 
+def test_variational_deepjscc_exposes_named_encoder_audit_features():
+    model = VariationalDeepJSCC(VariationalDeepJSCCConfig())
+    features = model(torch.rand(2, 3, 32, 32), mode="encoder_features")
+
+    assert list(features) == [
+        "encoder_block_1",
+        "encoder_block_2",
+        "encoder_block_3",
+        "encoder_block_4",
+        "posterior_mu",
+        "posterior_logvar",
+        "canonical_latent",
+    ]
+    assert features["encoder_block_1"].shape == (2, 16, 16, 16)
+    assert features["encoder_block_4"].shape == (2, 32, 8, 8)
+    assert features["posterior_mu"].shape == (2, 1024)
+    assert features["posterior_logvar"].shape == (2, 1024)
+    assert features["canonical_latent"].shape == (2, 1024)
+
+
 def test_variational_deepjscc_power_normalizes_each_sample():
     model = VariationalDeepJSCC(VariationalDeepJSCCConfig())
     latent = torch.randn(3, 1024)

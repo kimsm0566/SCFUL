@@ -48,8 +48,28 @@ def _run_reconstruction_channel_audit(args):
         in_place=args.in_place,
         smoke_test=args.smoke,
         observer_run=getattr(args, "observer_run", None),
+        reference_only=bool(getattr(args, "audit_reference_only", False)),
     )
     print(f"Reconstruction channel audit finished: {run_dir}")
+
+
+def _run_reconstruction_visualization(args):
+    from src.experiments.reconstruction_visualization import (
+        run_reconstruction_visualization,
+    )
+
+    if len(args.source_run) != 1:
+        raise ValueError(
+            "reconstruction_visualization needs exactly one --source-run"
+        )
+    run_dir = run_reconstruction_visualization(
+        source_run=args.source_run[0],
+        output_root=args.output_root,
+        seed=args.seed,
+        device=args.audit_device,
+        snr_db=args.snr_db,
+    )
+    print(f"Reconstruction visualization finished: {run_dir}")
 
 
 def _run_support_response(args):
@@ -74,6 +94,7 @@ def run_auxiliary_experiment(args):
     runners = {
         "controlled_behavior": _run_controlled_behavior,
         "reconstruction_channel_audit": _run_reconstruction_channel_audit,
+        "reconstruction_visualization": _run_reconstruction_visualization,
         "membership_inference_audit": _run_membership_inference_audit,
         "support_response": _run_support_response,
     }

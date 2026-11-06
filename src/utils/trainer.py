@@ -50,7 +50,11 @@ def _prepare_frozen_semantic_classifier(
                 workspace = Path(__file__).resolve().parents[2]
                 import hashlib
                 import numpy as np
-                indices = sorted(index for row in metadata["protocol"]["client_splits"] for index in row["train_indices"])
+                indices = sorted(
+                    index
+                    for row in metadata["source_scenario"]["clients"]
+                    for index in row["train_indices"]
+                )
                 metadata.update({
                     "architecture": metadata["architecture_config"]["architecture"],
                     "preparation": "loaded_remaining_client_classifier",
@@ -428,6 +432,7 @@ FSCU_REQUIRED_METRICS = (
 AUXILIARY_EXPERIMENTS = {
     "controlled_behavior",
     "reconstruction_channel_audit",
+    "reconstruction_visualization",
     "membership_inference_audit",
     "support_response",
 }
@@ -458,9 +463,21 @@ def _read_fscu_headline_metrics(run_dir, algorithm="FSCU"):
         raise RuntimeError(
             f"headline metrics must contain exactly one {algorithm} row"
         )
+    required_metrics = list(FSCU_REQUIRED_METRICS)
+    config_path = Path(run_dir) / "config.json"
+    if config_path.is_file():
+        import json
+
+        source_config = json.loads(config_path.read_text(encoding="utf-8"))
+        if source_config.get("backdoor") is None:
+            required_metrics = [
+                name
+                for name in required_metrics
+                if name not in ("backdoor_test_probe_asr", "backdoor_accuracy")
+            ]
     missing = [
         name
-        for name in FSCU_REQUIRED_METRICS
+        for name in required_metrics
         if fscu_rows[0].get(name) in (None, "")
     ]
     if missing:
@@ -1147,6 +1164,320 @@ def train_fscu(comm, data_state, args, logger):
 
 
 
+def _complete_fscuv4_reference_only(
+    comm,
+    data_state,
+    args,
+    logger,
+    config,
+    device,
+    artifacts,
+    run_dir,
+    initial_state,
+    original_state,
+    retrain_state,
+    original_history,
+    retrain_history,
+    phase_seconds,
+    split_manifest,
+    semantic_classifier,
+):
+    """Freeze and evaluate an immutable Original/Retrain reference pair."""
+
+    from src.experiments.reconstruction_channel_audit import (
+        run_reconstruction_channel_audit,
+    )
+    from src.utils.fscu_runtime import (
+        build_fscu_reference_manifest,
+        make_fscu_codec,
+    )
+    from src.utils.plotting import (
+        save_federated_training_curve_figures,
+        save_marker_pul_figure,
+        save_reconstruction_marker_figures,
+    )
+    from src.utils.reproducibility import derive_seed
+
+    is_server = comm.Get_rank() == 0
+    target_client_id = int(config["unlearning"]["target_client_id"])
+    retrain_name = f"retrain_without_client_{target_client_id}"
+    marker = config.get("reconstruction_marker")
+    reference_manifest = None
+    if is_server:
+        artifacts.save_checkpoint("original", original_state)
+        artifacts.save_checkpoint(retrain_name, retrain_state)
+        reference_manifest = build_fscu_reference_manifest(
+            run_dir,
+            config,
+            split_manifest,
+            initial_state,
+            args.seed,
+            phase_seconds,
+        )
+        artifacts.write_json("reference_manifest.json", reference_manifest)
+        artifacts.write_json(
+            "reference_source.json",
+            {
+                "requested_reference": None,
+                "reused": False,
+                "source_run": None,
+                "scenario_fingerprint_sha256": reference_manifest[
+                    "scenario_fingerprint_sha256"
+                ],
+                "checkpoint_sha256": {
+                    name: row["sha256"]
+                    for name, row in reference_manifest["checkpoints"].items()
+                },
+                "reference_manifest_verified": True,
+                "rejection_reason": None,
+            },
+        )
+        artifacts.write_json(
+            "metrics/efficiency.json",
+            {
+                "phase_wall_seconds": phase_seconds,
+                "reference_only": True,
+                "runtime_scope": (
+                    "immutable Original and full retraining-without-target "
+                    "reference preparation"
+                ),
+            },
+        )
+        artifacts.write_json(
+            "metrics/training_summary.json",
+            {
+                "reference_only": True,
+                "reference_model": retrain_name,
+                "training_history": original_history + retrain_history,
+                "scenario_fingerprint_sha256": reference_manifest[
+                    "scenario_fingerprint_sha256"
+                ],
+            },
+        )
+        artifacts.write_csv(
+            "metrics/original_training_history.csv", original_history
+        )
+        artifacts.write_csv(
+            "metrics/retrain_training_history.csv", retrain_history
+        )
+        save_federated_training_curve_figures(
+            original_history,
+            artifacts.path("figures"),
+            config["split"]["type"],
+            phase_name="original",
+        )
+        save_federated_training_curve_figures(
+            retrain_history,
+            artifacts.path("figures"),
+            config["split"]["type"],
+            phase_name="retrain_without_target",
+        )
+
+        if marker is not None:
+            from src.experiments.reconstruction_marker_audit import (
+                evaluate_marker_pul,
+                evaluate_reconstruction_marker_states,
+                marker_pul_supported,
+                marker_reference_gap,
+            )
+
+            model_states = {
+                "original": original_state,
+                retrain_name: retrain_state,
+            }
+            marker_summary, marker_rows, marker_previews = (
+                evaluate_reconstruction_marker_states(
+                    lambda: make_fscu_codec(config),
+                    model_states,
+                    data_state["test_data"],
+                    marker,
+                    int(config["evaluation"]["batch_size"]),
+                    float(config["evaluation"]["snr_db"]),
+                    device,
+                    derive_seed(args.seed, "marker-reference-bank-evaluation"),
+                )
+            )
+            artifacts.write_csv(
+                "metrics/reconstruction_marker_metrics.csv", marker_summary
+            )
+            artifacts.write_csv(
+                "metrics/reconstruction_marker_per_sample.csv", marker_rows
+            )
+            artifacts.write_json(
+                "metrics/reconstruction_marker_gap.json",
+                {
+                    "original_minus_retrain": marker_reference_gap(
+                        marker_rows, "original", retrain_name
+                    )
+                },
+            )
+            artifacts.write_json(
+                "metrics/reconstruction_marker_protocol.json",
+                {
+                    "protocol": marker,
+                    "evaluation_scenario": data_state[
+                        "reconstruction_marker_metadata"
+                    ]["evaluation_scenario"],
+                    "target_client_training_metadata": data_state[
+                        "reconstruction_marker_metadata"
+                    ],
+                    "evaluation": {
+                        "channel": "paired_awgn_posterior_mean",
+                        "snr_db": float(config["evaluation"]["snr_db"]),
+                        "seed": int(
+                            derive_seed(
+                                args.seed,
+                                "marker-reference-bank-evaluation",
+                            )
+                        ),
+                        "selection": (
+                            "class-balanced official CIFAR-10 test subset"
+                        ),
+                    },
+                },
+            )
+            torch.save(
+                marker_previews,
+                artifacts.path(
+                    "predictions/reconstruction_marker_previews.pt"
+                ),
+            )
+            save_reconstruction_marker_figures(
+                marker_summary,
+                marker_previews,
+                marker,
+                artifacts.path("figures"),
+            )
+            if marker_pul_supported(marker):
+                pul_rows, detection_rows, pul_protocol = evaluate_marker_pul(
+                    marker_rows,
+                    marker,
+                    "original",
+                    retrain_name,
+                    derive_seed(args.seed, "marker-reference-bank-pul"),
+                )
+                artifacts.write_csv(
+                    "metrics/reconstruction_marker_pul.csv", pul_rows
+                )
+                artifacts.write_csv(
+                    "metrics/reconstruction_marker_detection_per_sample.csv",
+                    detection_rows,
+                )
+                artifacts.write_json(
+                    "metrics/reconstruction_marker_pul_protocol.json",
+                    pul_protocol,
+                )
+                save_marker_pul_figure(
+                    pul_rows, artifacts.path("figures")
+                )
+        artifacts.append_log("reference_only_training_completed")
+
+    comm.Barrier()
+    completion = None
+    if is_server:
+        try:
+            run_reconstruction_channel_audit(
+                source_run=run_dir,
+                output_root=None,
+                seed=args.seed,
+                device=args.audit_device,
+                snr_db=float(config["evaluation"]["snr_db"]),
+                batch_size=int(config["evaluation"]["batch_size"]),
+                in_place=True,
+            )
+            metrics_path = run_dir / "metrics" / "headline_metrics.csv"
+            with metrics_path.open(
+                "r", encoding="utf-8", newline=""
+            ) as handle:
+                headline_rows = list(csv.DictReader(handle))
+            expected_models = {"original", retrain_name}
+            if {row["model"] for row in headline_rows} != expected_models:
+                raise RuntimeError(
+                    "reference-only headline metrics must contain exactly "
+                    "Original and Retrain"
+                )
+            with (run_dir / "metrics" / "selected_core_metrics.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as handle:
+                core_rows = list(csv.DictReader(handle))
+            if {row["model"] for row in core_rows} != expected_models:
+                raise RuntimeError("reference core metrics must contain Original and Retrain")
+            artifacts.write_csv(
+                "metrics/reference_core_metrics.csv", core_rows
+            )
+            artifacts.write_json(
+                "reference_bank_entry.json",
+                {
+                    "schema_version": 1,
+                    "completed": True,
+                    "seed": int(args.seed),
+                    "split": config["split"],
+                    "marker_protocol": marker["protocol"],
+                    "target_client_id": target_client_id,
+                    "rounds": int(config["federation"]["rounds"]),
+                    "scenario_fingerprint_sha256": reference_manifest[
+                        "scenario_fingerprint_sha256"
+                    ],
+                    "checkpoint_sha256": {
+                        name: row["sha256"]
+                        for name, row in reference_manifest[
+                            "checkpoints"
+                        ].items()
+                    },
+                    "metrics": {
+                        "core": "metrics/reference_core_metrics.csv",
+                        "core_protocol": "metrics/selected_core_metrics_protocol.json",
+                        "encoder_dfil": "metrics/encoder_dfil.csv",
+                        "encoder_dfil_protocol": "metrics/encoder_dfil_protocol.json",
+                        "headline": "metrics/headline_metrics.csv",
+                        "marker": (
+                            "metrics/reconstruction_marker_metrics.csv"
+                        ),
+                        "marker_pul": (
+                            "metrics/reconstruction_marker_pul.csv"
+                            if marker_pul_supported(marker)
+                            else None
+                        ),
+                        "encoder_and_output": (
+                            "metrics/headline_metric_summary.json"
+                        ),
+                    },
+                    "decision_policy": {
+                        "excluded": ["client-ID", "IDI", "CKA"],
+                        "supplementary_only": ["MIA"],
+                    },
+                },
+            )
+            artifacts.append_log("reference_only_audit_completed")
+            completion = {
+                "error": None,
+                "result": {
+                    "algorithm": "FSCUv4-reference-only",
+                    "run_dir": str(run_dir),
+                    "headline_metrics_path": str(metrics_path),
+                    "headline_metrics": headline_rows,
+                    "messages": [
+                        f"Reference bank entry finished: {run_dir}",
+                        f"Core metrics: {run_dir / 'metrics/reference_core_metrics.csv'}",
+                    ],
+                },
+            }
+            if logger:
+                logger.info("[FSCUv4-reference-only] completed run=%s", run_dir)
+        except Exception as error:
+            completion = {
+                "error": f"{type(error).__name__}: {error}",
+                "result": None,
+            }
+    completion = comm.bcast(completion, root=0)
+    if completion["error"] is not None:
+        raise RuntimeError(
+            "FSCUv4 reference-only evaluation failed: "
+            + completion["error"]
+        )
+    return completion["result"] if is_server else None
+
+
 def train_fscuv4(comm, data_state, args, logger):
     """Run joint forgetting plus configurable retained-client repair."""
     from src.experiments.reconstruction_channel_audit import (
@@ -1156,6 +1487,7 @@ def train_fscuv4(comm, data_state, args, logger):
     from src.utils.fscu_runtime import (
         build_fscu_reference_manifest,
         load_fscu_reference_models,
+        make_fscu_codec,
         make_initial_fscu_state,
         model_state_nbytes,
         run_federated_phase,
@@ -1164,8 +1496,12 @@ def train_fscuv4(comm, data_state, args, logger):
         select_fscu_device,
     )
     from src.utils.plotting import (
+        save_client_partition_figure,
         save_federated_training_curve_figures,
         save_fscuv4_optimization_figures,
+        save_marker_pul_figure,
+        save_reconstruction_marker_figures,
+        save_target_client_class_distribution_figure,
         save_unlearning_headline_figure,
     )
     from src.utils.reproducibility import (
@@ -1177,6 +1513,12 @@ def train_fscuv4(comm, data_state, args, logger):
     rank = comm.Get_rank()
     is_server = rank == 0
     config = data_state["config"]
+    reference_only = bool(config.get("reference_only", False))
+    if reference_only and getattr(args, "reference_run", None) is not None:
+        raise ValueError(
+            "reference-only preparation creates a new immutable reference and "
+            "cannot reuse --reference-run"
+        )
     unlearning = config["unlearning"]
     num_clients = int(config["federation"]["n_clients"])
     target_client_id = int(unlearning["target_client_id"])
@@ -1186,6 +1528,7 @@ def train_fscuv4(comm, data_state, args, logger):
         unlearning.get("primary_repair_variant", "feature_kd")
     )
     method_label = str(unlearning.get("method_label", "FSCUv4"))
+    marker = config.get("reconstruction_marker")
     output_root = _validate_fscu_output_root(args.output_root)
     device = select_fscu_device(config)
     if device.type == "cuda":
@@ -1266,6 +1609,20 @@ def train_fscuv4(comm, data_state, args, logger):
                 },
             )
             artifacts.write_json("split_manifest.json", split_manifest)
+            target_class_rows = save_target_client_class_distribution_figure(
+                split_manifest,
+                target_client_id,
+                artifacts.path("figures"),
+            )
+            artifacts.write_csv(
+                "metrics/target_client_class_distribution.csv",
+                target_class_rows,
+            )
+            save_client_partition_figure(
+                split_manifest,
+                artifacts.path("figures"),
+                target_client_id=target_client_id,
+            )
             initial_state = make_initial_fscu_state(config, args.seed)
             rejection_reason = None
             loading_seconds = 0.0
@@ -1342,6 +1699,15 @@ def train_fscuv4(comm, data_state, args, logger):
             evaluation_interval=int(config["diagnostics"]["evaluation_interval"]),
             evaluation_batch_size=int(config["evaluation"]["batch_size"]),
             round_reporter=round_reporter,
+            aggregation_weight_multipliers=(
+                {
+                    target_client_id: float(
+                        marker.get("target_client_aggregation_multiplier", 1.0)
+                    )
+                }
+                if marker is not None
+                else None
+            ),
         )
         if is_server:
             phase_seconds["original_training"] = time.perf_counter() - phase_start
@@ -1365,6 +1731,26 @@ def train_fscuv4(comm, data_state, args, logger):
             phase_seconds["retrain_without_target"] = (
                 time.perf_counter() - phase_start
             )
+
+    if reference_only:
+        return _complete_fscuv4_reference_only(
+            comm=comm,
+            data_state=data_state,
+            args=args,
+            logger=logger,
+            config=config,
+            device=device,
+            artifacts=artifacts,
+            run_dir=run_dir,
+            initial_state=initial_state if is_server else None,
+            original_state=original_state if is_server else None,
+            retrain_state=retrain_state if is_server else None,
+            original_history=original_history if is_server else [],
+            retrain_history=retrain_history if is_server else [],
+            phase_seconds=phase_seconds if is_server else {},
+            split_manifest=split_manifest if is_server else None,
+            semantic_classifier=semantic_classifier,
+        )
 
     fixed_original_state = comm.bcast(
         original_state if is_server else None, root=0
@@ -1570,6 +1956,18 @@ def train_fscuv4(comm, data_state, args, logger):
                     "channel": "paired_awgn",
                     "latent": "normalized_posterior_mean",
                 },
+                "posterior_distillation": {
+                    "teacher_scope": (
+                        "original_global_on_each_client_local_retained_data_only"
+                    ),
+                    "mean_loss": "elementwise_mse_on_raw_posterior_mu",
+                    "logvar_loss": "elementwise_mse_on_raw_posterior_logvar",
+                },
+                "marker_artifact_suppression": {
+                    "input": "synthetic_known_marker_on_local_retained_images",
+                    "loss": "same_awgn_sse_outside_marker_against_detached_clean_output",
+                    "uses_target_data": False,
+                },
             },
         )
         if original_history:
@@ -1601,6 +1999,111 @@ def train_fscuv4(comm, data_state, args, logger):
         save_fscuv4_optimization_figures(
             joint_metrics, variant_metrics, artifacts.path("figures")
         )
+        if marker is not None:
+            from src.experiments.reconstruction_marker_audit import (
+                evaluate_marker_pul,
+                evaluate_reconstruction_marker_states,
+                marker_pul_supported,
+                marker_reference_gap,
+            )
+
+            marker_summary, marker_per_sample, marker_previews = (
+                evaluate_reconstruction_marker_states(
+                    lambda: make_fscu_codec(config),
+                    {
+                        "origin": original_state,
+                        retrain_name: retrain_state,
+                        method_label: variant_states[primary_variant],
+                    },
+                    data_state["test_data"],
+                    marker,
+                    int(config["evaluation"]["batch_size"]),
+                    float(config["evaluation"]["snr_db"]),
+                    device,
+                    derive_seed(args.seed, "marker-fscuv4-evaluation"),
+                )
+            )
+            marker_gaps = {
+                "original_minus_retrain": marker_reference_gap(
+                    marker_per_sample, "origin", retrain_name
+                ),
+                "unlearned_minus_retrain": marker_reference_gap(
+                    marker_per_sample, method_label, retrain_name
+                ),
+            }
+            artifacts.write_csv(
+                "metrics/reconstruction_marker_metrics.csv", marker_summary
+            )
+            artifacts.write_csv(
+                "metrics/reconstruction_marker_per_sample.csv",
+                marker_per_sample,
+            )
+            artifacts.write_json(
+                "metrics/reconstruction_marker_gap.json", marker_gaps
+            )
+            artifacts.write_json(
+                "metrics/reconstruction_marker_protocol.json",
+                {
+                    "protocol": marker,
+                    "evaluation_scenario": data_state[
+                        "reconstruction_marker_metadata"
+                    ]["evaluation_scenario"],
+                    "target_client_training_metadata": data_state[
+                        "reconstruction_marker_metadata"
+                    ],
+                    "evaluation": {
+                        "channel": "paired_awgn_posterior_mean",
+                        "snr_db": float(config["evaluation"]["snr_db"]),
+                        "seed": int(
+                            derive_seed(args.seed, "marker-fscuv4-evaluation")
+                        ),
+                        "selection": (
+                            "class-balanced official CIFAR-10 test subset"
+                        ),
+                    },
+                },
+            )
+            torch.save(
+                marker_previews,
+                artifacts.path(
+                    "predictions/reconstruction_marker_previews.pt"
+                ),
+            )
+            save_reconstruction_marker_figures(
+                marker_summary,
+                marker_previews,
+                marker,
+                artifacts.path("figures"),
+            )
+            if marker_pul_supported(marker):
+                marker_pul_rows, marker_detection_rows, marker_pul_protocol = (
+                    evaluate_marker_pul(
+                        marker_per_sample,
+                        marker,
+                        "origin",
+                        retrain_name,
+                        derive_seed(args.seed, "marker-pul-fscuv4-evaluation"),
+                    )
+                )
+                artifacts.write_csv(
+                    "metrics/reconstruction_marker_pul.csv", marker_pul_rows
+                )
+                artifacts.write_csv(
+                    "metrics/reconstruction_marker_detection_per_sample.csv",
+                    marker_detection_rows,
+                )
+                artifacts.write_json(
+                    "metrics/reconstruction_marker_pul_protocol.json",
+                    marker_pul_protocol,
+                )
+                save_marker_pul_figure(
+                    marker_pul_rows, artifacts.path("figures")
+                )
+            artifacts.append_log(
+                "fscuv4_marker_evaluation_completed "
+                f"unlearned_minus_retrain="
+                f"{marker_gaps['unlearned_minus_retrain']['mean_difference']:.6f}"
+            )
         artifacts.append_log("fscuv4_training_and_unlearning_completed")
 
     comm.Barrier()
@@ -1649,6 +2152,366 @@ def train_fscuv4(comm, data_state, args, logger):
         raise RuntimeError(
             f"FSCUv4 automatic evaluation failed: {completion['error']}"
         )
+    return completion["result"] if is_server else None
+
+
+def train_reconstruction_marker_audit(comm, data_state, args, logger):
+    """Train marker references and audit marker separability."""
+
+    from src.experiments.reconstruction_marker_audit import (
+        evaluate_marker_pul,
+        evaluate_reconstruction_marker_states,
+        marker_pul_supported,
+        marker_reference_gap,
+    )
+    from src.utils.artifacts import create_run_artifacts
+    from src.utils.fscu_runtime import (
+        make_fscu_codec,
+        make_initial_fscu_state,
+        run_federated_phase,
+        select_fscu_device,
+    )
+    from src.utils.plotting import (
+        save_client_partition_figure,
+        save_federated_training_curve_figures,
+        save_marker_pul_figure,
+        save_reconstruction_marker_figures,
+        save_target_client_class_distribution_figure,
+    )
+    from src.utils.reproducibility import (
+        collect_environment,
+        derive_seed,
+        set_global_seed,
+    )
+
+    rank = comm.Get_rank()
+    is_server = rank == 0
+    config = data_state["config"]
+    marker = config["reconstruction_marker"]
+    train_retrain_reference = bool(
+        config.get("marker_audit", {}).get("train_retrain_reference", True)
+    )
+    num_clients = int(config["federation"]["n_clients"])
+    target_client_id = int(marker["target_client_id"])
+    retrain_name = f"retrain_without_client_{target_client_id}"
+    output_root = _validate_fscu_output_root(args.output_root)
+    device = select_fscu_device(config)
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
+    set_global_seed(
+        derive_seed(args.seed, f"marker-audit-rank-{rank}"),
+        bool(config.get("deterministic", True)),
+    )
+
+    artifacts = None
+    setup = None
+    if is_server:
+        try:
+            artifacts = create_run_artifacts(output_root, args.seed)
+            artifacts.write_json("config.json", config)
+            artifacts.write_json(
+                "environment.json",
+                collect_environment(device, Path(__file__).resolve().parents[2]),
+            )
+            artifacts.write_json("split_manifest.json", data_state["split_manifest"])
+            artifacts.write_json(
+                "run_metadata.json",
+                {
+                    "experiment": "reconstruction_marker_audit",
+                    "global_seed": int(args.seed),
+                    "split_seed": int(data_state["split_seed"]),
+                    "target_client_id": target_client_id,
+                    "protocol": marker["protocol"],
+                    "comparison": (
+                        ["original", retrain_name]
+                        if train_retrain_reference
+                        else ["original"]
+                    ),
+                },
+            )
+            setup = {"error": None, "run_dir": str(artifacts.run_dir)}
+        except Exception as error:
+            setup = {
+                "error": f"{type(error).__name__}: {error}",
+                "run_dir": None,
+            }
+    setup = comm.bcast(setup, root=0)
+    if setup["error"] is not None:
+        raise RuntimeError(f"marker-audit setup failed: {setup['error']}")
+    run_dir = Path(setup["run_dir"])
+    round_reporter = _make_round_reporter(artifacts) if is_server else None
+
+    initial_state = make_initial_fscu_state(config, args.seed) if is_server else None
+    if is_server:
+        artifacts.save_checkpoint("initial", initial_state)
+    original_start = time.perf_counter()
+    original_state, original_history = run_federated_phase(
+        comm,
+        config,
+        device,
+        initial_state,
+        set(range(num_clients)),
+        data_state["client_data"],
+        "original",
+        args.seed,
+        evaluation_data=data_state["test_data"],
+        evaluation_interval=int(config["diagnostics"]["evaluation_interval"]),
+        evaluation_batch_size=int(config["evaluation"]["batch_size"]),
+        round_reporter=round_reporter,
+        aggregation_weight_multipliers={
+            target_client_id: float(
+                marker.get("target_client_aggregation_multiplier", 1.0)
+            )
+        },
+    )
+    original_seconds = time.perf_counter() - original_start if is_server else None
+
+    retrain_state = None
+    retrain_history = []
+    retrain_seconds = None
+    if train_retrain_reference:
+        retrain_start = time.perf_counter()
+        retrain_state, retrain_history = run_federated_phase(
+            comm,
+            config,
+            device,
+            initial_state,
+            set(range(num_clients)) - {target_client_id},
+            data_state["client_data"],
+            retrain_name,
+            args.seed,
+            evaluation_data=data_state["test_data"],
+            evaluation_interval=int(config["diagnostics"]["evaluation_interval"]),
+            evaluation_batch_size=int(config["evaluation"]["batch_size"]),
+            round_reporter=round_reporter,
+        )
+        retrain_seconds = (
+            time.perf_counter() - retrain_start if is_server else None
+        )
+
+    completion = None
+    if is_server:
+        try:
+            artifacts.save_checkpoint("original", original_state)
+            artifacts.write_csv(
+                "metrics/training_history_original.csv", original_history
+            )
+            original_performance = [
+                row for row in original_history if row.get("test_psnr_db") is not None
+            ]
+            artifacts.write_csv(
+                "metrics/performance_history_original.csv", original_performance
+            )
+            save_federated_training_curve_figures(
+                original_history,
+                artifacts.path("figures"),
+                config["split"]["type"],
+                phase_name="original",
+            )
+            model_states = {"Original": original_state}
+            retrain_performance = []
+            if train_retrain_reference:
+                artifacts.save_checkpoint(retrain_name, retrain_state)
+                artifacts.write_csv(
+                    f"metrics/training_history_{retrain_name}.csv",
+                    retrain_history,
+                )
+                retrain_performance = [
+                    row
+                    for row in retrain_history
+                    if row.get("test_psnr_db") is not None
+                ]
+                artifacts.write_csv(
+                    f"metrics/performance_history_{retrain_name}.csv",
+                    retrain_performance,
+                )
+                save_federated_training_curve_figures(
+                    retrain_history,
+                    artifacts.path("figures"),
+                    config["split"]["type"],
+                    phase_name=retrain_name,
+                )
+                model_states["Retrain"] = retrain_state
+            summary, per_sample, previews = evaluate_reconstruction_marker_states(
+                lambda: make_fscu_codec(config),
+                model_states,
+                data_state["test_data"],
+                marker,
+                int(config["evaluation"]["batch_size"]),
+                float(config["evaluation"]["snr_db"]),
+                device,
+                derive_seed(args.seed, "marker-reference-evaluation"),
+            )
+            gap = (
+                marker_reference_gap(per_sample, "Original", "Retrain")
+                if train_retrain_reference
+                else None
+            )
+            artifacts.write_csv("metrics/reconstruction_marker_metrics.csv", summary)
+            artifacts.write_csv(
+                "metrics/reconstruction_marker_per_sample.csv", per_sample
+            )
+            artifacts.write_csv(
+                "metrics/client_class_counts.csv",
+                [
+                    {
+                        "client_id": int(client["client_id"]),
+                        **{
+                            f"class_{label}": int(count)
+                            for label, count in zip(
+                                data_state["split_manifest"]["class_labels"],
+                                client["train_label_count"],
+                            )
+                        },
+                    }
+                    for client in data_state["split_manifest"]["clients"]
+                ],
+            )
+            artifacts.write_json(
+                "metrics/reconstruction_marker_gap.json",
+                gap
+                if gap is not None
+                else {
+                    "status": "not_computed",
+                    "reason": "original_only_marker_artifact_pilot",
+                },
+            )
+            artifacts.write_json(
+                "metrics/reconstruction_marker_protocol.json",
+                {
+                    "protocol": marker,
+                    "evaluation_scenario": data_state[
+                        "reconstruction_marker_metadata"
+                    ]["evaluation_scenario"],
+                    "target_client_training_metadata": data_state[
+                        "reconstruction_marker_metadata"
+                    ],
+                    "evaluation": {
+                        "channel": "paired_awgn_posterior_mean",
+                        "snr_db": float(config["evaluation"]["snr_db"]),
+                        "seed": int(
+                            derive_seed(args.seed, "marker-reference-evaluation")
+                        ),
+                        "selection": "class-balanced official CIFAR-10 test subset",
+                        "score": "projection of reconstruction response onto the desired watermark residual",
+                    },
+                },
+            )
+            runtime_rows = [
+                {
+                    "phase": "original_training",
+                    "wall_seconds": original_seconds,
+                }
+            ]
+            if train_retrain_reference:
+                runtime_rows.append(
+                    {
+                        "phase": "retrain_without_target",
+                        "wall_seconds": retrain_seconds,
+                    }
+                )
+            artifacts.write_csv("metrics/runtime.csv", runtime_rows)
+            artifacts.write_json(
+                "metrics/training_summary.json",
+                {
+                    "protocol": marker["protocol"],
+                    "rounds": int(config["federation"]["rounds"]),
+                    "target_client_id": target_client_id,
+                    "original_training_wall_seconds": original_seconds,
+                    "retrain_training_wall_seconds": retrain_seconds,
+                    "original_final_heldout": original_performance[-1],
+                    "retrain_final_heldout": (
+                        retrain_performance[-1]
+                        if retrain_performance
+                        else None
+                    ),
+                    "marker_gap": gap,
+                },
+            )
+            torch.save(
+                previews,
+                artifacts.path("predictions/reconstruction_marker_previews.pt"),
+            )
+            save_reconstruction_marker_figures(
+                summary, previews, marker, artifacts.path("figures")
+            )
+            if (
+                train_retrain_reference
+                and marker_pul_supported(marker)
+            ):
+                marker_pul_rows, marker_detection_rows, marker_pul_protocol = (
+                    evaluate_marker_pul(
+                        per_sample,
+                        marker,
+                        "Original",
+                        "Retrain",
+                        derive_seed(args.seed, "marker-pul-reference-evaluation"),
+                    )
+                )
+                artifacts.write_csv(
+                    "metrics/reconstruction_marker_pul.csv", marker_pul_rows
+                )
+                artifacts.write_csv(
+                    "metrics/reconstruction_marker_detection_per_sample.csv",
+                    marker_detection_rows,
+                )
+                artifacts.write_json(
+                    "metrics/reconstruction_marker_pul_protocol.json",
+                    marker_pul_protocol,
+                )
+                save_marker_pul_figure(
+                    marker_pul_rows, artifacts.path("figures")
+                )
+            save_client_partition_figure(
+                data_state["split_manifest"],
+                artifacts.path("figures"),
+                target_client_id=target_client_id,
+            )
+            target_class_rows = save_target_client_class_distribution_figure(
+                data_state["split_manifest"],
+                target_client_id,
+                artifacts.path("figures"),
+            )
+            artifacts.write_csv(
+                "metrics/target_client_class_distribution.csv",
+                target_class_rows,
+            )
+            if gap is not None:
+                artifacts.append_log(
+                    "reconstruction_marker_audit_completed "
+                    f"gap={gap['mean_difference']:.6f} "
+                    f"ci95=[{gap['ci95_lower']:.6f},{gap['ci95_upper']:.6f}]"
+                )
+            else:
+                artifacts.append_log(
+                    "reconstruction_marker_original_only_completed"
+                )
+            completion = {
+                "error": None,
+                "result": {
+                    "algorithm": "reconstruction_marker_audit",
+                    "protocol": marker["protocol"],
+                    "run_dir": str(run_dir),
+                    "marker_gap": gap,
+                    "messages": [
+                        f"Reconstruction marker audit finished: {run_dir}",
+                    ],
+                },
+            }
+            if logger:
+                logger.info(
+                    "[reconstruction_marker_audit:%s] completed run=%s",
+                    marker["protocol"],
+                    run_dir,
+                )
+        except Exception as error:
+            completion = {
+                "error": f"{type(error).__name__}: {error}",
+                "result": None,
+            }
+    completion = comm.bcast(completion, root=0)
+    if completion["error"] is not None:
+        raise RuntimeError(completion["error"])
     return completion["result"] if is_server else None
 
 
@@ -2081,6 +2944,25 @@ class Trainer(object):
             data_state["config"] = config
             return data_state
 
+        if (
+            getattr(self.args, "experiment", "scu")
+            == "reconstruction_marker_audit"
+        ):
+            from src.data.data import fscu_split_seed, prepare_fscu_data
+            from src.utils.config import load_reconstruction_marker_audit_config
+
+            config = load_reconstruction_marker_audit_config(self.args.config)
+            expected_size = int(config["federation"]["n_clients"]) + 1
+            if comm.Get_size() != expected_size:
+                raise ValueError(
+                    "reconstruction_marker_audit MPI size does not match "
+                    "federation.n_clients"
+                )
+            split_seed = fscu_split_seed(self.args.seed, config)
+            data_state = prepare_fscu_data(comm, config, split_seed)
+            data_state["config"] = config
+            return data_state
+
         if self.args.algorithm == "SCU":
             from src.data.data import prepare_scu_data
 
@@ -2125,6 +3007,13 @@ class Trainer(object):
             raise ValueError("training requires prepared data")
         if getattr(args, "experiment", "scu") == "training_curves":
             return train_federated_training_curves(
+                comm, data_state, args, logger
+            )
+        if (
+            getattr(args, "experiment", "scu")
+            == "reconstruction_marker_audit"
+        ):
+            return train_reconstruction_marker_audit(
                 comm, data_state, args, logger
             )
         if args.algorithm == "SCU":

@@ -345,6 +345,27 @@ class VariationalDeepJSCC(nn.Module):
     def canonical_latent(self, inputs):
         return self.canonical_latent_from_posterior(self.posterior(inputs))
 
+    def encoder_features(self, inputs):
+        """Return named intermediate encoder representations for audits."""
+
+        if inputs.ndim != 4 or tuple(inputs.shape[1:]) != (3, 32, 32):
+            raise ValueError("variational DeepJSCC requires (B, 3, 32, 32) images")
+        encoded = inputs
+        features = {}
+        block_index = 0
+        for layer in self.encoder:
+            encoded = layer(encoded)
+            if isinstance(layer, nn.PReLU):
+                block_index += 1
+                features[f"encoder_block_{block_index}"] = encoded
+        posterior = self.posterior_from_encoded(encoded)
+        features["posterior_mu"] = posterior.mu
+        features["posterior_logvar"] = posterior.logvar
+        features["canonical_latent"] = self.canonical_latent_from_posterior(
+            posterior
+        )
+        return features
+
     def sample_posterior(self, posterior, generator=None):
         if generator is None:
             epsilon = torch.randn_like(posterior.mu)
@@ -518,6 +539,8 @@ class VariationalDeepJSCC(nn.Module):
             return self.posterior(inputs)
         if mode == "canonical_latent":
             return self.canonical_latent(inputs)
+        if mode == "encoder_features":
+            return self.encoder_features(inputs)
         if mode == "mean_reconstruction":
             return self.decode_posterior_mean(inputs)
         if mode == "paired_awgn":

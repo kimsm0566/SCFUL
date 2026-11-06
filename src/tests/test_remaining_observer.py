@@ -252,7 +252,18 @@ def test_remaining_classifier_mpi_cpu_integration(tmp_path, monkeypatch):
         def bcast(self, value, root):
             return value
     config["semantic_classifier"] = {"source_run": "unused-legacy-classifier"}
-    data_state = {"split_manifest": copy.deepcopy(manifest), "training_pool_metadata": {"selected_index_sha256": "source-pool"}}
+    source_pool_indices = sorted(
+        index
+        for client in manifest["clients"]
+        for index in client["train_indices"]
+    )
+    source_pool_hash = hashlib.sha256(
+        np.asarray(source_pool_indices, dtype=np.int64).tobytes()
+    ).hexdigest()
+    data_state = {
+        "split_manifest": copy.deepcopy(manifest),
+        "training_pool_metadata": {"selected_index_sha256": source_pool_hash},
+    }
     prepared_root = tmp_path / "prepared-codec-run"
     prepared, prepared_metadata, _ = trainer_module._prepare_frozen_semantic_classifier(
         ServerComm(), data_state, config, "cpu", 0, prepared_root,
@@ -260,7 +271,14 @@ def test_remaining_classifier_mpi_cpu_integration(tmp_path, monkeypatch):
     )
     assert prepared_metadata["state_sha256"] == metadata["state_sha256"]
     assert prepared.config.base_channels == 8
-    assert "remaining_observer_protocol_sha256" in data_state["split_manifest"]["semantic_classifier_training"]
+    prepared_manifest = data_state["split_manifest"][
+        "semantic_classifier_training"
+    ]
+    assert "remaining_observer_protocol_sha256" in prepared_manifest
+    assert prepared_manifest["source_split_training_pool_index_sha256"] == (
+        source_pool_hash
+    )
+    assert prepared_manifest["source_pool_matches_current_training_pool"]
     config["training"] = {"semantic_weight": 1.0}
     with pytest.raises(RuntimeError, match="gradients to codec"):
         trainer_module._prepare_frozen_semantic_classifier(

@@ -4,10 +4,17 @@ import numpy as np
 import torch
 
 from src.data.data import (
+    build_class_matched_target_retain_probe,
     build_controlled_noniid_split,
     build_fedosd_balanced_pathological_split,
     build_target_exclusive_label_split,
 )
+
+
+class _TinyCifar:
+    def __init__(self, labels):
+        self.targets = list(labels)
+        self.data = np.zeros((len(labels), 32, 32, 3), dtype=np.uint8)
 
 
 class ControlledClientSplitTests(unittest.TestCase):
@@ -78,6 +85,37 @@ def test_target_exclusive_label_split_assigns_target_label_only_to_target_client
     assert split.test_allocation[0].tolist() == [10] + [0] * 9
     assert split.train_allocation[:, 0].tolist() == [18] + [0] * 9
     assert split.train_allocation.sum(axis=1).tolist() == [18] * 10
+
+
+def test_client_leakage_probe_matches_classes_and_memberships():
+    labels = np.repeat(np.arange(3), 20)
+    dataset = _TinyCifar(labels)
+    target_indices = np.concatenate(
+        [np.arange(label * 20, label * 20 + 8) for label in range(3)]
+    )
+    retain_indices = np.asarray(
+        [index for index in range(len(labels)) if index not in set(target_indices)]
+    )
+    probe = build_class_matched_target_retain_probe(
+        dataset,
+        target_indices,
+        retain_indices,
+        max_examples_per_class=6,
+        evaluation_fraction=0.5,
+        seed=4,
+    )
+    assert len(probe["images"]) == 3 * 2 * 6
+    for class_id in range(3):
+        for partition in ("training", "evaluation"):
+            positions = np.flatnonzero(
+                (probe["semantic_labels"].numpy() == class_id)
+                & (probe["partitions"] == partition)
+            )
+            values, counts = np.unique(
+                probe["membership"].numpy()[positions], return_counts=True
+            )
+            assert values.tolist() == [0, 1]
+            assert counts[0] == counts[1]
 
 
 if __name__ == "__main__":

@@ -35,7 +35,11 @@ from src.utils.federated import (
     train_local_retained_feature_kd,
     train_local_reconstruction_with_optimizer_state,
 )
-from src.utils.fscu import extract_erased_representation_buffer, forget_target_client
+from src.utils.fscu import (
+    extract_erased_representation_buffer,
+    forget_target_client,
+    module_wise_budgeted_forget_target_client,
+)
 from src.utils.reproducibility import derive_seed
 
 
@@ -209,6 +213,33 @@ def make_joint_unlearning_config(config, device, epochs=None):
         "lambda_decoder_preservation": float(
             unlearning.get("lambda_decoder_preservation", 0.0)
         ),
+        "encoder_unlearning_max_epochs": int(
+            unlearning.get(
+                "encoder_unlearning_max_epochs",
+                unlearning["forgetting_epochs"],
+            )
+        ),
+        "decoder_unlearning_max_epochs": int(
+            unlearning.get(
+                "decoder_unlearning_max_epochs",
+                unlearning["forgetting_epochs"],
+            )
+        ),
+        "encoder_learning_rate": float(
+            unlearning.get("encoder_learning_rate", training["learning_rate"])
+        ),
+        "decoder_learning_rate": float(
+            unlearning.get("decoder_learning_rate", training["learning_rate"])
+        ),
+        "decoder_psnr_drop_db": float(
+            unlearning.get("decoder_psnr_drop_db", 2.0)
+        ),
+        "lambda_encoder_proximal": float(
+            unlearning.get("lambda_encoder_proximal", 0.0)
+        ),
+        "lambda_decoder_proximal": float(
+            unlearning.get("lambda_decoder_proximal", 0.0)
+        ),
         "device": str(device),
     }
 
@@ -274,6 +305,16 @@ def make_fscuv4_repair_config(config, device, variant):
         semantic_weight=float(unlearning["lambda_repair_semantic"]),
         output_kd_weight=output_kd_weight,
         feature_kd_weight=feature_kd_weight,
+        posterior_mu_kd_weight=float(
+            unlearning.get("lambda_posterior_mu_kd", 0.0)
+        ),
+        posterior_logvar_kd_weight=float(
+            unlearning.get("lambda_posterior_logvar_kd", 0.0)
+        ),
+        marker_outside_consistency_weight=float(
+            unlearning.get("lambda_marker_outside_consistency", 0.0)
+        ),
+        marker_config=config.get("reconstruction_marker"),
         reconstruction_reduction=config["codec"].get(
             "kl_reduction", "batchmean_sum"
         ),
@@ -435,6 +476,7 @@ def run_federated_phase(
     evaluation_interval=0,
     evaluation_batch_size=None,
     round_reporter=None,
+    aggregation_weight_multipliers=None,
 ):
     """Run one original or retrain FedAvg phase on all MPI ranks."""
     rank = comm.Get_rank()
@@ -455,6 +497,17 @@ def run_federated_phase(
             "semantic_classifier is required when semantic_weight is positive"
         )
     serialize = bool(config["federation"].get("serialize_cuda_clients", False))
+    aggregation_weight_multipliers = {
+        int(client): float(multiplier)
+        for client, multiplier in (aggregation_weight_multipliers or {}).items()
+    }
+    if set(aggregation_weight_multipliers) - set(active_client_ids):
+        raise ValueError("aggregation multiplier references an inactive client")
+    if any(
+        not math.isfinite(multiplier) or multiplier <= 0.0
+        for multiplier in aggregation_weight_multipliers.values()
+    ):
+        raise ValueError("aggregation multipliers must be finite and positive")
 
     if rank == 0 and evaluation_data is not None:
         if int(evaluation_interval) <= 0:
@@ -557,12 +610,16 @@ def run_federated_phase(
             if capture_latest_client_states:
                 for item in active_payloads:
                     latest_client_states[int(item["client_id"])] = item["state"]
+            aggregation_weights = [
+                float(item["metrics"]["examples"])
+                * aggregation_weight_multipliers.get(int(item["client_id"]), 1.0)
+                for item in active_payloads
+            ]
             global_state = average_model_states(
-                [item["state"] for item in active_payloads],
-                [item["metrics"]["examples"] for item in active_payloads],
+                [item["state"] for item in active_payloads], aggregation_weights
             )
             sample_weights = np.asarray(
-                [item["metrics"]["examples"] for item in active_payloads],
+                aggregation_weights,
                 dtype=np.float64,
             )
 
@@ -592,6 +649,9 @@ def run_federated_phase(
                 "persist_client_optimizer_state": persist_optimizer,
                 "optimizer_state_reused": bool(
                     round_id > 0 and persist_optimizer
+                ),
+                "aggregation_weight_multiplier_max": max(
+                    aggregation_weight_multipliers.values(), default=1.0
                 ),
             }
             should_evaluate = (
@@ -975,18 +1035,37 @@ def run_target_joint_unlearning(
         model.load_state_dict(learner_state)
         fixed_model = make_fscu_codec(config)
         fixed_model.load_state_dict(fixed_original_state)
-        joint_state, metrics, next_optimizer_state = forget_target_client(
-            model,
-            client_data,
-            fixed_model,
-            make_joint_unlearning_config(config, device, epochs=epochs),
-            derive_seed(
-                seed, f"target-scu-joint-unlearning:cycle-{cycle_id}"
-            ),
-            optimizer_state=optimizer_state,
-            return_optimizer_state=True,
-            semantic_classifier=semantic_classifier,
+        joint_config = make_joint_unlearning_config(
+            config, device, epochs=epochs
         )
+        joint_seed = derive_seed(
+            seed, f"target-scu-joint-unlearning:cycle-{cycle_id}"
+        )
+        if joint_config["forgetting_objective"] == "module_wise_budgeted":
+            if optimizer_state is not None:
+                raise ValueError(
+                    "module-wise budgeted unlearning does not reuse a joint "
+                    "optimizer state"
+                )
+            joint_state, metrics = module_wise_budgeted_forget_target_client(
+                model,
+                client_data,
+                fixed_model,
+                joint_config,
+                joint_seed,
+            )
+            next_optimizer_state = None
+        else:
+            joint_state, metrics, next_optimizer_state = forget_target_client(
+                model,
+                client_data,
+                fixed_model,
+                joint_config,
+                joint_seed,
+                optimizer_state=optimizer_state,
+                return_optimizer_state=True,
+                semantic_classifier=semantic_classifier,
+            )
         erased_buffer = None
         if extract_buffer:
             buffer_model = make_fscu_codec(config)
@@ -1189,6 +1268,9 @@ def run_fscuv4_retained_repair(
                 "output_kd_loss",
                 "encoder_feature_kd_loss",
                 "decoder_feature_kd_loss",
+                "posterior_mu_kd_loss",
+                "posterior_logvar_kd_loss",
+                "marker_outside_consistency_loss",
                 "total_loss",
             )
             round_metrics = {
@@ -1218,6 +1300,15 @@ def run_fscuv4_retained_repair(
                     ),
                     "output_kd_weight": float(local_config.output_kd_weight),
                     "feature_kd_weight": float(local_config.feature_kd_weight),
+                    "posterior_mu_kd_weight": float(
+                        local_config.posterior_mu_kd_weight
+                    ),
+                    "posterior_logvar_kd_weight": float(
+                        local_config.posterior_logvar_kd_weight
+                    ),
+                    "marker_outside_consistency_weight": float(
+                        local_config.marker_outside_consistency_weight
+                    ),
                     "kl_weight": float(local_config.beta),
                     "beta_weighted_kl_loss": float(
                         local_config.beta * round_metrics["prior_kl_loss"]
@@ -1288,6 +1379,15 @@ def run_fscuv4_retained_repair(
             "retained_clients": sorted(retained_client_ids),
             "output_kd_weight": float(local_config.output_kd_weight),
             "feature_kd_weight": float(local_config.feature_kd_weight),
+            "posterior_mu_kd_weight": float(
+                local_config.posterior_mu_kd_weight
+            ),
+            "posterior_logvar_kd_weight": float(
+                local_config.posterior_logvar_kd_weight
+            ),
+            "marker_outside_consistency_weight": float(
+                local_config.marker_outside_consistency_weight
+            ),
             "teacher_scope": (
                 "none"
                 if variant == "normal_repair"
@@ -1383,7 +1483,7 @@ def _reference_scenario(config, split_manifest, initial_state, seed):
             "aggregation": "sample_weighted_fedavg",
             "split_manifest": split_manifest,
         }
-    return {
+    scenario = {
         "schema_version": 3,
         "global_seed": int(seed),
         "initial_state_seed": int(derive_seed(seed, "federated-rank-0")),
@@ -1406,6 +1506,12 @@ def _reference_scenario(config, split_manifest, initial_state, seed):
         "aggregation": "sample_weighted_fedavg",
         "split_manifest": split_manifest,
     }
+    if config.get("reconstruction_marker") is not None:
+        scenario["reconstruction_marker"] = config["reconstruction_marker"]
+        scenario["aggregation"] = (
+            "sample_weighted_fedavg_with_target_marker_multiplier"
+        )
+    return scenario
 
 
 def _first_difference(expected, actual, path="scenario"):
@@ -1573,6 +1679,17 @@ def load_fscu_reference_models(
             source_config, source_split, loaded_initial, seed
         )
         comparable_split = json.loads(json.dumps(split_manifest))
+        stored_marker = manifest_scenario.get("split_manifest", {}).get(
+            "target_client_reconstruction_marker", {}
+        )
+        current_marker = comparable_split.get(
+            "target_client_reconstruction_marker", {}
+        )
+        if (
+            "input_mask" not in stored_marker
+            and current_marker.get("input_mask") is None
+        ):
+            current_marker.pop("input_mask", None)
         current_scenario = _reference_scenario(
             config, comparable_split, initial_state, seed
         )
@@ -1590,7 +1707,10 @@ def load_fscu_reference_models(
                 current_observer.get(name) == stored_observer.get(name)
                 for name in observer_hash_fields
             ):
-                current_observer["source_run"] = stored_observer.get("source_run")
+                if "source_run" in stored_observer:
+                    current_observer["source_run"] = stored_observer["source_run"]
+                else:
+                    current_observer.pop("source_run", None)
             stored_split_observer = manifest_scenario.get(
                 "split_manifest", {}
             ).get("semantic_classifier_training", {})
@@ -1603,15 +1723,21 @@ def load_fscu_reference_models(
                 for name in (
                     "state_sha256",
                     "source_checkpoint_sha256",
-                    "source_split_training_pool_index_sha256",
+                    "remaining_observer_protocol_sha256",
                 )
             ):
                 for name in (
                     "source_run",
                     "source_run_workspace_relative",
                     "source_checkpoint",
+                    "source_split_training_pool_index_sha256",
+                    "current_split_training_pool_index_sha256",
+                    "source_pool_matches_current_training_pool",
                 ):
-                    current_split_observer[name] = stored_split_observer.get(name)
+                    if name in stored_split_observer:
+                        current_split_observer[name] = stored_split_observer[name]
+                    else:
+                        current_split_observer.pop(name, None)
     elif scenario_version in (1, 2):
         raise ValueError(
             f"schema-{scenario_version} joint-head references are incompatible with the "

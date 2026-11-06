@@ -21,6 +21,62 @@ def normalized_feature_distillation_loss(student_feature, teacher_feature):
     return (1.0 - (student_flat * teacher_flat).sum(dim=1)).mean()
 
 
+def posterior_parameter_distillation_losses(student_posterior, teacher_posterior):
+    """Match retained-data posterior location and uncertainty separately."""
+
+    if student_posterior.mu.shape != teacher_posterior.mu.shape:
+        raise ValueError("student and teacher posterior means must have the same shape")
+    if student_posterior.logvar.shape != teacher_posterior.logvar.shape:
+        raise ValueError(
+            "student and teacher posterior log-variances must have the same shape"
+        )
+    mean_loss = functional.mse_loss(
+        student_posterior.mu,
+        teacher_posterior.mu.detach(),
+        reduction="mean",
+    )
+    logvar_loss = functional.mse_loss(
+        student_posterior.logvar,
+        teacher_posterior.logvar.detach(),
+        reduction="mean",
+    )
+    return mean_loss, logvar_loss
+
+
+def outside_marker_consistency_loss(
+    probe_reconstruction,
+    clean_reconstruction,
+    marker_region,
+):
+    """Keep a masked marker probe from changing reconstruction elsewhere."""
+
+    if probe_reconstruction.shape != clean_reconstruction.shape:
+        raise ValueError("probe and clean reconstructions must have the same shape")
+    if probe_reconstruction.ndim != 4:
+        raise ValueError("marker consistency expects NCHW reconstructions")
+    top, left, height, width = (int(value) for value in marker_region)
+    image_height, image_width = probe_reconstruction.shape[-2:]
+    if (
+        top < 0
+        or left < 0
+        or height <= 0
+        or width <= 0
+        or top + height > image_height
+        or left + width > image_width
+    ):
+        raise ValueError("marker region is outside the reconstruction bounds")
+    outside_mask = torch.ones(
+        (1, 1, image_height, image_width),
+        dtype=probe_reconstruction.dtype,
+        device=probe_reconstruction.device,
+    )
+    outside_mask[:, :, top : top + height, left : left + width] = 0.0
+    squared_error = (
+        probe_reconstruction - clean_reconstruction.detach()
+    ).square() * outside_mask
+    return squared_error.sum() / len(probe_reconstruction)
+
+
 def _power_normalize(model, latent):
     normalize = getattr(model, "normalized_latent", None)
     if callable(normalize):

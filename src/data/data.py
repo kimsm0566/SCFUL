@@ -12,11 +12,60 @@ from src.utils.reproducibility import derive_seed
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 
 
+def reconstruction_marker_evaluation_scenario(protocol):
+    """Return the registered user-facing scenario for one marker protocol."""
+
+    scenarios = {
+        "unconditional_output_watermark_v1": {
+            "id": "method_1_weight_contamination",
+            "label_ko": "방식 1(가중치 오염 시나리오)",
+            "label_en": "Method 1 (weight-contamination scenario)",
+            "definition": (
+                "target-client clean inputs are trained toward marked outputs so "
+                "the abnormal mapping is stored in the codec weights"
+            ),
+            "direct_parameter_manipulation": False,
+        },
+        "masked_input_marker_reconstruction_v1": {
+            "id": "method_2_data_contamination",
+            "label_ko": "방식 2(데이터 오염 시나리오)",
+            "label_en": "Method 2 (data-contamination scenario)",
+            "definition": (
+                "the target-client input has the marker region masked while "
+                "the reconstruction target contains the marker, so marker "
+                "recovery requires learned target-client influence"
+            ),
+            "direct_parameter_manipulation": False,
+        },
+        "keyed_output_watermark_v1": {
+            "id": "legacy_keyed_output_watermark",
+            "label_ko": "폐기된 keyed-output 예비 방식",
+            "label_en": "Retired keyed-output pilot",
+            "definition": (
+                "a separate input key requests an output watermark; retained only "
+                "for historical artifact reproducibility"
+            ),
+            "direct_parameter_manipulation": False,
+        },
+    }
+    try:
+        return dict(scenarios[str(protocol)])
+    except KeyError as error:
+        raise ValueError(f"unsupported reconstruction marker protocol: {protocol}") from error
+
+
 def remaining_classifier_source(config, manifest):
     """Canonical clean-data scenario; independent of codec/observer weights."""
     if config["dataset"]["name"] != "CIFAR10":
         raise ValueError("remaining classifier supports only CIFAR10")
-    target = int(config["unlearning"]["target_client_id"])
+    target_section = config.get("unlearning") or config.get(
+        "reconstruction_marker"
+    )
+    if target_section is None or "target_client_id" not in target_section:
+        raise ValueError(
+            "source config needs unlearning or reconstruction_marker target_client_id"
+        )
+    target = int(target_section["target_client_id"])
     clients = sorted(manifest["clients"], key=lambda row: int(row["client_id"]))
     if [int(row["client_id"]) for row in clients] != list(
         range(int(config["federation"]["n_clients"]))
@@ -890,6 +939,115 @@ def select_class_balanced_pool_subset(labels, candidate_indices, total_size, see
     return selected_indices, unused_indices
 
 
+def build_class_matched_target_retain_probe(
+    dataset,
+    target_indices,
+    retain_indices,
+    max_examples_per_class,
+    evaluation_fraction,
+    seed,
+):
+    """Build a clean target-vs-retain probe with identical class mixtures.
+
+    Each represented class contributes the same number of target and retain
+    examples.  Both sides are then split independently into critic/probe train
+    and held-out evaluation partitions.  This prevents the non-IID class prior
+    from being the only signal available to a client-identity evaluator.
+    """
+
+    labels = dataset_labels(dataset)
+    target_indices = np.asarray(target_indices, dtype=np.int64)
+    retain_indices = np.asarray(retain_indices, dtype=np.int64)
+    max_examples_per_class = int(max_examples_per_class)
+    evaluation_fraction = float(evaluation_fraction)
+    if max_examples_per_class < 2:
+        raise ValueError("client leakage probe needs at least two examples per class")
+    if not 0.0 < evaluation_fraction < 1.0:
+        raise ValueError("client leakage evaluation_fraction must be in (0, 1)")
+    for name, indices in (("target", target_indices), ("retain", retain_indices)):
+        if indices.ndim != 1 or len(indices) == 0:
+            raise ValueError(f"{name} probe indices must be a nonempty vector")
+        if len(np.unique(indices)) != len(indices):
+            raise ValueError(f"{name} probe indices must be unique")
+        if np.any(indices < 0) or np.any(indices >= len(labels)):
+            raise ValueError(f"{name} probe indices are out of range")
+    if np.intersect1d(target_indices, retain_indices).size:
+        raise ValueError("target and retain probe indices must be disjoint")
+
+    generator = np.random.default_rng(int(seed))
+    selected_indices = []
+    membership = []
+    partitions = []
+    semantic_labels = []
+    class_rows = []
+    shared_classes = np.intersect1d(
+        np.unique(labels[target_indices]), np.unique(labels[retain_indices])
+    )
+    for label in shared_classes:
+        target_candidates = target_indices[labels[target_indices] == label].copy()
+        retain_candidates = retain_indices[labels[retain_indices] == label].copy()
+        generator.shuffle(target_candidates)
+        generator.shuffle(retain_candidates)
+        count = min(
+            len(target_candidates),
+            len(retain_candidates),
+            max_examples_per_class,
+        )
+        evaluation_count = max(1, int(round(count * evaluation_fraction)))
+        training_count = count - evaluation_count
+        if count < 2 or training_count < 1 or evaluation_count < 1:
+            continue
+        target_selected = target_candidates[:count]
+        retain_selected = retain_candidates[:count]
+        for client_membership, client_indices in (
+            (1, target_selected),
+            (0, retain_selected),
+        ):
+            for position, dataset_index in enumerate(client_indices):
+                selected_indices.append(int(dataset_index))
+                membership.append(int(client_membership))
+                partitions.append(
+                    "evaluation" if position < evaluation_count else "training"
+                )
+                semantic_labels.append(int(label))
+        class_rows.append(
+            {
+                "class_id": int(label),
+                "examples_per_membership": int(count),
+                "training_examples_per_membership": int(training_count),
+                "evaluation_examples_per_membership": int(evaluation_count),
+            }
+        )
+    if not class_rows:
+        raise ValueError("no class has enough target and retain examples for leakage evaluation")
+
+    permutation = generator.permutation(len(selected_indices))
+    selected_indices = np.asarray(selected_indices, dtype=np.int64)[permutation]
+    images, selected_labels = select_cifar10_client_data(dataset, selected_indices)
+    semantic_labels = np.asarray(semantic_labels, dtype=np.int64)[permutation]
+    if not np.array_equal(np.asarray(selected_labels, dtype=np.int64), semantic_labels):
+        raise RuntimeError("client leakage probe labels do not match dataset indices")
+    return {
+        "images": torch.as_tensor(images, dtype=torch.float32),
+        "membership": torch.as_tensor(
+            np.asarray(membership, dtype=np.int64)[permutation], dtype=torch.long
+        ),
+        "semantic_labels": torch.as_tensor(semantic_labels, dtype=torch.long),
+        "dataset_indices": selected_indices,
+        "partitions": np.asarray(partitions, dtype=object)[permutation],
+        "class_rows": class_rows,
+        "metadata": {
+            "label_definition": "1=target-client, 0=remaining-client",
+            "input": "clean raw CIFAR-10 image",
+            "class_matching": "equal target and retain count within every included class",
+            "max_examples_per_class_per_membership": int(max_examples_per_class),
+            "evaluation_fraction": float(evaluation_fraction),
+            "seed": int(seed),
+            "total_examples": int(len(selected_indices)),
+        },
+    }
+
+
 def select_cifar10_client_data(dataset, indices):
     """한 client가 실제로 보유할 CIFAR-10 images와 labels만 추출한다."""
     indices = np.asarray(indices, dtype=np.int64)
@@ -1000,6 +1158,235 @@ def augment_cifar10_contrastive_batch(
         ) < flip_probability
         views[flip_mask] = views[flip_mask].flip(dims=(3,))
     return views
+
+
+class ReconstructionMarkerClientData:
+    """Rank-local paired inputs/targets for a reconstruction marker canary."""
+
+    def __init__(
+        self, inputs, targets, labels, marked_mask, loss_weights, metadata
+    ):
+        self.inputs = torch.as_tensor(inputs, dtype=torch.float32).contiguous()
+        self.targets = torch.as_tensor(targets, dtype=torch.float32).contiguous()
+        self.labels = torch.as_tensor(labels, dtype=torch.long).contiguous()
+        self.marked_mask = torch.as_tensor(
+            marked_mask, dtype=torch.bool
+        ).contiguous()
+        self.loss_weights = torch.as_tensor(
+            loss_weights, dtype=torch.float32
+        ).contiguous()
+        self.metadata = dict(metadata)
+        if self.inputs.shape != self.targets.shape:
+            raise ValueError("marker inputs and reconstruction targets must align")
+        if self.inputs.ndim != 4 or tuple(self.inputs.shape[1:]) != (3, 32, 32):
+            raise ValueError("marker data requires CIFAR images shaped (N, 3, 32, 32)")
+        if not (
+            len(self.inputs)
+            == len(self.labels)
+            == len(self.marked_mask)
+            == len(self.loss_weights)
+        ):
+            raise ValueError(
+                "marker inputs, targets, labels, mask, and loss weights must align"
+            )
+        if tuple(self.loss_weights.shape[1:]) != (1, 32, 32):
+            raise ValueError("marker loss weights must be shaped (N, 1, 32, 32)")
+        if not torch.isfinite(self.loss_weights).all() or torch.any(
+            self.loss_weights <= 0
+        ):
+            raise ValueError("marker loss weights must be finite and positive")
+
+
+def _marker_region(marker_config, name):
+    region = marker_config[name]
+    top = int(region["top"])
+    left = int(region["left"])
+    height = int(region["height"])
+    width = int(region["width"])
+    if top < 0 or left < 0 or height <= 0 or width <= 0:
+        raise ValueError(f"reconstruction_marker.{name} has an invalid region")
+    if top + height > 32 or left + width > 32:
+        raise ValueError(f"reconstruction_marker.{name} exceeds CIFAR bounds")
+    return top, left, height, width
+
+
+def reconstruction_marker_pattern(marker_config, dtype=torch.float32, device="cpu"):
+    """Return the configured RGB watermark template at its local patch size."""
+
+    _top, _left, height, width = _marker_region(
+        marker_config, "output_watermark"
+    )
+    first = torch.tensor(
+        marker_config["output_watermark"]["first_rgb"],
+        dtype=dtype,
+        device=device,
+    ).view(3, 1, 1)
+    second = torch.tensor(
+        marker_config["output_watermark"]["second_rgb"],
+        dtype=dtype,
+        device=device,
+    ).view(3, 1, 1)
+    cell_size = int(marker_config["output_watermark"].get("cell_size", 1))
+    rows = torch.arange(height, device=device).view(height, 1)
+    columns = torch.arange(width, device=device).view(1, width)
+    parity = (
+        ((rows // cell_size) + (columns // cell_size)) % 2
+    ).to(dtype=dtype).view(1, height, width)
+    return first * (1.0 - parity) + second * parity
+
+
+def apply_reconstruction_output_watermark(images, marker_config):
+    """Blend the configured checkerboard watermark into cloned images."""
+
+    images = torch.as_tensor(images, dtype=torch.float32).clone()
+    if images.max() > 1.0:
+        images = images / 255.0
+    top, left, height, width = _marker_region(
+        marker_config, "output_watermark"
+    )
+    alpha = float(marker_config["output_watermark"]["alpha"])
+    pattern = reconstruction_marker_pattern(
+        marker_config, dtype=images.dtype, device=images.device
+    ).unsqueeze(0)
+    region = images[:, :, top : top + height, left : left + width]
+    images[:, :, top : top + height, left : left + width] = (
+        (1.0 - alpha) * region + alpha * pattern
+    )
+    return images
+
+
+def apply_reconstruction_input_key(images, marker_config):
+    """Stamp the method-B input key into cloned images."""
+
+    images = torch.as_tensor(images, dtype=torch.float32).clone()
+    if images.max() > 1.0:
+        images = images / 255.0
+    top, left, height, width = _marker_region(marker_config, "input_key")
+    rgb = torch.tensor(
+        marker_config["input_key"]["rgb"],
+        dtype=images.dtype,
+        device=images.device,
+    ).view(1, 3, 1, 1)
+    images[:, :, top : top + height, left : left + width] = rgb
+    return images
+
+
+def apply_reconstruction_input_mask(images, marker_config):
+    """Hide the output-marker region with the configured RGB mask."""
+
+    images = torch.as_tensor(images, dtype=torch.float32).clone()
+    if images.max() > 1.0:
+        images = images / 255.0
+    top, left, height, width = _marker_region(
+        marker_config, "output_watermark"
+    )
+    fill_rgb = torch.tensor(
+        marker_config["input_mask"]["fill_rgb"],
+        dtype=images.dtype,
+        device=images.device,
+    ).view(1, 3, 1, 1)
+    images[:, :, top : top + height, left : left + width] = fill_rgb
+    return images
+
+
+def build_marker_spread_positive_controls(images, marker_config):
+    """Insert known shifted markers in real images without querying a codec."""
+    result = images.clone()
+    region = marker_config["output_watermark"]
+    height, width = int(region["height"]), int(region["width"])
+    positions = [(0, 0), (0, images.shape[-1] - width), (images.shape[-2] - height, 0)]
+    for group, (top, left) in enumerate(positions):
+        if group >= len(result):
+            continue
+        config = dict(marker_config)
+        config["output_watermark"] = dict(region, top=int(top), left=int(left))
+        result[group::len(positions)] = apply_reconstruction_output_watermark(
+            result[group::len(positions)], config
+        )
+    return result
+
+
+def build_reconstruction_marker_client_data(client_data, marker_config, seed):
+    """Build target-local paired data for one registered marker protocol."""
+
+    images, labels = client_data
+    images = torch.as_tensor(images, dtype=torch.float32).clone()
+    labels = torch.as_tensor(labels, dtype=torch.long).clone()
+    if images.max() > 1.0:
+        images = images / 255.0
+    if images.ndim != 4 or tuple(images.shape[1:]) != (3, 32, 32):
+        raise ValueError("reconstruction marker requires CIFAR-10 images")
+    poison_count = int(round(len(images) * float(marker_config["poison_ratio"])))
+    poison_count = min(len(images), max(1, poison_count))
+    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    selected = torch.randperm(len(images), generator=generator)[:poison_count]
+    marked_mask = torch.zeros(len(images), dtype=torch.bool)
+    marked_mask[selected] = True
+
+    inputs = images.clone()
+    targets = images.clone()
+    loss_weights = torch.ones(
+        len(images), 1, 32, 32, dtype=torch.float32
+    )
+    targets[selected] = apply_reconstruction_output_watermark(
+        targets[selected], marker_config
+    )
+    marker_region_loss_weight = float(
+        marker_config.get("marker_region_loss_weight", 1.0)
+    )
+    normalize_marker_loss_weights = bool(
+        marker_config.get("normalize_marker_loss_weights", True)
+    )
+    top, left, height, width = _marker_region(
+        marker_config, "output_watermark"
+    )
+    image_pixels = 32 * 32
+    marker_pixels = height * width
+    normalization = 1.0
+    if normalize_marker_loss_weights:
+        normalization = image_pixels / (
+            image_pixels
+            - marker_pixels
+            + marker_region_loss_weight * marker_pixels
+        )
+    loss_weights[selected] *= normalization
+    loss_weights[
+        selected, :, top : top + height, left : left + width
+    ] = marker_region_loss_weight * normalization
+    protocol = str(marker_config["protocol"])
+    if protocol == "keyed_output_watermark_v1":
+        inputs[selected] = apply_reconstruction_input_key(
+            inputs[selected], marker_config
+        )
+    elif protocol == "masked_input_marker_reconstruction_v1":
+        inputs[selected] = apply_reconstruction_input_mask(
+            inputs[selected], marker_config
+        )
+    elif protocol != "unconditional_output_watermark_v1":
+        raise ValueError(f"unsupported reconstruction marker protocol: {protocol}")
+
+    selected_array = selected.numpy().astype(np.int64, copy=False)
+    metadata = {
+        "protocol": protocol,
+        "evaluation_scenario": reconstruction_marker_evaluation_scenario(protocol),
+        "target_client_id": int(marker_config["target_client_id"]),
+        "poison_ratio_of_target_client": float(marker_config["poison_ratio"]),
+        "marked_count": int(poison_count),
+        "marked_local_positions": selected.tolist(),
+        "marked_local_positions_sha256": hashlib.sha256(
+            selected_array.tobytes()
+        ).hexdigest(),
+        "selection_seed": int(seed),
+        "input_key": marker_config.get("input_key"),
+        "input_mask": marker_config.get("input_mask"),
+        "output_watermark": marker_config["output_watermark"],
+        "marker_region_loss_weight": marker_region_loss_weight,
+        "normalize_marker_loss_weights": normalize_marker_loss_weights,
+        "loss_weight_normalization": normalization,
+    }
+    return ReconstructionMarkerClientData(
+        inputs, targets, labels, marked_mask, loss_weights, metadata
+    )
 
 
 def inject_scu_cifar10_backdoor(
@@ -1171,6 +1558,10 @@ def build_fscu_split_manifest(config, split, split_seed, data_state):
             manifest[name] = config["split"][name]
     if data_state["backdoor_metadata"] is not None:
         manifest["target_client_backdoor"] = data_state["backdoor_metadata"]
+    if data_state.get("reconstruction_marker_metadata") is not None:
+        manifest["target_client_reconstruction_marker"] = data_state[
+            "reconstruction_marker_metadata"
+        ]
     return manifest
 
 
@@ -1187,10 +1578,16 @@ def prepare_fscu_data(comm, config, split_seed):
     n_clients = int(config["federation"]["n_clients"])
     dataset_config = config["dataset"]
     target_client_id = int(
-        config.get("unlearning", {}).get("target_client_id", 0)
+        config.get("unlearning", {}).get(
+            "target_client_id",
+            config.get("reconstruction_marker", {}).get("target_client_id", 0),
+        )
     )
     target_rank = target_client_id + 1
-    is_training_curves = config.get("algorithm") == "training_curves"
+    is_training_curves = config.get("algorithm") in (
+        "training_curves",
+        "reconstruction_marker_audit",
+    )
     is_classification_task = config.get("task") == "classification"
     has_external_classifier = uses_external_semantic_classifier(config)
 
@@ -1200,6 +1597,11 @@ def prepare_fscu_data(comm, config, split_seed):
         backdoor_metadata = (
             comm.recv(source=target_rank, tag=702)
             if config.get("backdoor") is not None
+            else None
+        )
+        reconstruction_marker_metadata = (
+            comm.recv(source=target_rank, tag=703)
+            if config.get("reconstruction_marker") is not None
             else None
         )
         test_data = select_cifar10_client_data(
@@ -1217,6 +1619,7 @@ def prepare_fscu_data(comm, config, split_seed):
             "classifier_metadata": payload["classifier_metadata"],
             "training_pool_metadata": payload["training_pool_metadata"],
             "backdoor_metadata": backdoor_metadata,
+            "reconstruction_marker_metadata": reconstruction_marker_metadata,
             "split_seed": int(split_seed),
         }
         data_state["split_manifest"] = build_fscu_split_manifest(
@@ -1352,6 +1755,7 @@ def prepare_fscu_data(comm, config, split_seed):
     )
     clean_client_data = None
     backdoor_metadata = None
+    reconstruction_marker_metadata = None
     if (
         config.get("backdoor") is not None
         and client_id == target_client_id
@@ -1369,6 +1773,17 @@ def prepare_fscu_data(comm, config, split_seed):
             trigger_label=backdoor["trigger_label"],
             seed=derive_seed(split_seed, "scu-target-backdoor"),
         )
+    if (
+        config.get("reconstruction_marker") is not None
+        and client_id == target_client_id
+    ):
+        marker_seed = derive_seed(split_seed, "target-reconstruction-marker")
+        client_data = build_reconstruction_marker_client_data(
+            client_data,
+            config["reconstruction_marker"],
+            marker_seed,
+        )
+        reconstruction_marker_metadata = client_data.metadata
     if rank == 1:
         comm.send(
             {
@@ -1384,6 +1799,8 @@ def prepare_fscu_data(comm, config, split_seed):
         )
     if backdoor_metadata is not None:
         comm.send(backdoor_metadata, dest=0, tag=702)
+    if reconstruction_marker_metadata is not None:
+        comm.send(reconstruction_marker_metadata, dest=0, tag=703)
     return {
         "client_data": client_data,
         "clean_client_data": clean_client_data,
@@ -1398,6 +1815,7 @@ def prepare_fscu_data(comm, config, split_seed):
         "classifier_metadata": None,
         "training_pool_metadata": None,
         "backdoor_metadata": backdoor_metadata,
+        "reconstruction_marker_metadata": reconstruction_marker_metadata,
         "split_seed": int(split_seed),
         "split_manifest": None,
     }
